@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DWS Device Enforcer</title>
+    <style>
+        /* Base Styling & Background */
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: linear-gradient(135deg, #1f1c2c 0%, #928dab 100%);
+            min-height: 100vh;
+            color: white;
+        }
+
+        h1 {
+            text-align: center;
+            font-weight: 300;
+            letter-spacing: 2px;
+            margin-bottom: 40px;
+        }
+
+        /* CSS Grid for Devices */
+        .device-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 25px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        /* Glassmorphism Card Design */
+        .device-card {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            padding: 20px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            transition: transform 0.2s ease;
+        }
+
+        .device-card:hover {
+            transform: translateY(-5px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .device-name {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        /* Button Controls */
+        .controls {
+            display: flex;
+            gap: 15px;
+            width: 100%;
+        }
+
+        button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        /* Active States */
+        button.active-on {
+            background: rgba(46, 213, 115, 0.3);
+            border-color: #2ed573;
+            box-shadow: 0 0 15px rgba(46, 213, 115, 0.4);
+        }
+
+        button.active-off {
+            background: rgba(255, 71, 87, 0.3);
+            border-color: #ff4757;
+            box-shadow: 0 0 15px rgba(255, 71, 87, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+    <h1>DEVICE ENFORCER</h1>
+    <div class="device-grid" id="grid">
+        <!-- Devices will be injected here via JavaScript -->
+    </div>
+
+    <script>
+        // Fetch devices from Flask and build the UI
+        async function loadDevices() {
+            const response = await fetch('/api/get_devices');
+            const devices = await response.json();
+            const grid = document.getElementById('grid');
+            grid.innerHTML = '';
+
+            devices.forEach(dev => {
+                const card = document.createElement('div');
+                card.className = 'device-card';
+                
+                // Determine which button is active based on the backend state
+                const onActive = dev.enforced === 'on' ? 'active-on' : '';
+                const offActive = dev.enforced === 'off' ? 'active-off' : '';
+
+                card.innerHTML = `
+                    <div class="device-name">${dev.name}</div>
+                    <div class="controls">
+                        <button class="btn-on ${onActive}" onclick="toggleEnforce('${dev.id}', 'on')">KEEP ON</button>
+                        <button class="btn-off ${offActive}" onclick="toggleEnforce('${dev.id}', 'off')">KEEP OFF</button>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // Send toggle command back to Flask
+        async function toggleEnforce(deviceId, stateType) {
+            // Check current visual state to see if we are turning it ON or turning it OFF
+            const buttonClicked = event.target;
+            let forceState = stateType;
+
+            // If the user clicks a button that is already active, we assume they want to turn the enforcer off completely.
+            if (buttonClicked.classList.contains('active-on') || buttonClicked.classList.contains('active-off')) {
+                forceState = null; 
+            }
+
+            await fetch('/api/enforce_device', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: deviceId, force_state: forceState })
+            });
+
+            // Reload UI to reflect changes
+            loadDevices();
+        }
+
+        // Load initially
+        loadDevices();
+    </script>
+</body>
+</html>
