@@ -1,0 +1,4 @@
+flask
+flask-socketio
+paramiko
+eventlet
