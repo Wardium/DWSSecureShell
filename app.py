@@ -41,6 +41,10 @@ def handle_ssh_connection(data):
         return
 
     server = SERVERS[server_id]
+    
+    # SAVE THE SESSION ID HERE BEFORE THE BACKGROUND TASK STARTS
+    client_sid = request.sid  
+    
     logging.info(f"Attempting SSH connection to {server['host']}...")
     
     ssh = paramiko.SSHClient()
@@ -50,8 +54,7 @@ def handle_ssh_connection(data):
         ssh.connect(server['host'], username=server['user'], password=server['password'], timeout=5)
         channel = ssh.invoke_shell()
         
-        # Save the session to our dictionary using the user's unique socket ID
-        active_sessions[request.sid] = ssh
+        active_sessions[client_sid] = ssh
         
         logging.info(f"SUCCESS: SSH session established for {server['host']}")
 
@@ -60,8 +63,11 @@ def handle_ssh_connection(data):
                 try:
                     output = channel.recv(1024).decode('utf-8')
                     if output:
-                        socketio.emit('ssh_output', {'output': output}, to=request.sid)
-                except Exception:
+                        # USE THE SAVED SESSION ID
+                        socketio.emit('ssh_output', {'output': output}, to=client_sid)
+                except Exception as e:
+                    # LOG THE ACTUAL ERROR INSTEAD OF FAILING SILENTLY
+                    logging.error(f"SSH listener error: {e}")
                     break
             logging.info(f"Stopped listening to SSH on {server['host']}")
 
@@ -74,7 +80,8 @@ def handle_ssh_connection(data):
 
     except Exception as e:
         logging.error(f"FAILED: SSH connection failed. Reason: {str(e)}")
-        socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=request.sid)
+        # USE THE SAVED SESSION ID HERE AS WELL
+        socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=client_sid)
 
 # Handle tab closures safely
 @socketio.on('disconnect')
