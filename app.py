@@ -99,6 +99,7 @@ def handle_disconnect():
 # ==========================================
 import requests
 import logging
+import time
 
 # --- GOOGLE API CREDENTIALS ---
 G_CLIENT_ID = "129761454210-26032tf9jtbc70rt04l4ahjuv85281f9.apps.googleusercontent.com"
@@ -198,6 +199,44 @@ class GoogleHomeAPI:
             logging.info(f"Successfully commanded {device_id} to turn {target_state}")
         except Exception as e:
             logging.error(f"Failed to change state for {device_id}: {e}")
+
+    @app.route('/devices')
+    def devices_dashboard():
+    return render_template('devices.html')
+
+    @app.route('/api/enforce_device', methods=['POST'])
+    def api_enforce_device():
+        data = request.json
+        device_id = data.get('id')
+        force_state = data.get('force_state') # 'on', 'off', or None
+    
+        if force_state:
+            enforced_devices[device_id] = force_state
+            logging.info(f"Enforcer activated: {device_id} MUST stay {force_state}")
+        else:
+            enforced_devices.pop(device_id, None)
+            logging.info(f"Enforcer deactivated for: {device_id}")
+            
+    return jsonify({"status": "success"})
+    
+    def device_monitor_loop():
+    logging.info("Starting Device Enforcer background loop...")
+    while True:
+        if enforced_devices:
+            current_devices = GoogleHomeAPI.get_devices()
+            
+            for dev in current_devices:
+                dev_id = dev['id']
+                if dev_id in enforced_devices:
+                    required_state = enforced_devices[dev_id]
+                    actual_state = dev['state']
+                    
+                    if actual_state != required_state:
+                        logging.warning(f"Rebel device detected! Correcting...")
+                        GoogleHomeAPI.set_device_state(dev_id, required_state)
+        
+        eventlet.sleep(5)
+
 
 if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
