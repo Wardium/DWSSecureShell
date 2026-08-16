@@ -18,8 +18,8 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- CONFIGURATION ---
 SERVERS = {
-    "1": {"host": "192.168.1.10", "user": "dylan", "password": "yourpassword1"},
-    "2": {"host": "192.168.1.11", "user": "root", "password": "yourpassword2"},
+    "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
+    "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
     "3": {"host": "192.168.1.12", "user": "admin", "password": "yourpassword3"}
 }
 
