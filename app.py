@@ -1,11 +1,13 @@
-from flask import Flask, render_template
+# THESE TWO LINES MUST BE AT THE VERY TOP
+import eventlet
+eventlet.monkey_patch()
+
+from flask import Flask, render_template, request
 from flask_socketio import SocketIO
 import paramiko
 import logging
 import sys
 
-# --- CONSOLE LOGGING SETUP ---
-# This forces logs to stream immediately to Docker's standard output
 logging.basicConfig(
     stream=sys.stdout, 
     level=logging.INFO, 
@@ -16,23 +18,20 @@ logging.basicConfig(
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- CONFIGURATION ---
+# Dictionary to track active SSH sessions so we can close them when a tab is closed
+active_sessions = {}
+
 SERVERS = {
     "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
     "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
-    "3": {"host": "192.168.1.12", "user": "admin", "password": "yourpassword3"}
+    "3": {"host": "192.168.2.12", "user": "admin", "password": "yourpassword3"}
 }
 
-# ==========================================
-# MODULE 1: DWS Server Shell
-# ==========================================
 @app.route('/shell/<server_id>')
 def shell(server_id):
     if server_id not in SERVERS:
-        logging.warning(f"404: Someone tried to access invalid Server ID: {server_id}")
+        logging.warning(f"404: Invalid Server ID accessed: {server_id}")
         return "Server not found", 404
-    
-    logging.info(f"Web interface loaded for Server ID: {server_id}")
     return render_template('shell.html', server_id=server_id)
 
 @socketio.on('connect_ssh')
@@ -42,7 +41,7 @@ def handle_ssh_connection(data):
         return
 
     server = SERVERS[server_id]
-    logging.info(f"Attempting SSH connection to {server['host']} as user '{server['user']}'...")
+    logging.info(f"Attempting SSH connection to {server['host']}...")
     
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -50,16 +49,21 @@ def handle_ssh_connection(data):
     try:
         ssh.connect(server['host'], username=server['user'], password=server['password'], timeout=5)
         channel = ssh.invoke_shell()
+        
+        # Save the session to our dictionary using the user's unique socket ID
+        active_sessions[request.sid] = ssh
+        
         logging.info(f"SUCCESS: SSH session established for {server['host']}")
 
         def listen_to_ssh():
             while not channel.closed:
                 try:
                     output = channel.recv(1024).decode('utf-8')
-                    socketio.emit('ssh_output', {'output': output})
+                    if output:
+                        socketio.emit('ssh_output', {'output': output}, to=request.sid)
                 except Exception:
-                    logging.info(f"SSH session closed for {server['host']}")
                     break
+            logging.info(f"Stopped listening to SSH on {server['host']}")
 
         socketio.start_background_task(listen_to_ssh)
 
@@ -69,9 +73,17 @@ def handle_ssh_connection(data):
                 channel.send(input_data['input'])
 
     except Exception as e:
-        error_msg = str(e)
-        logging.error(f"FAILED: SSH connection to {server['host']} failed. Reason: {error_msg}")
-        socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {error_msg}\r\n'})
+        logging.error(f"FAILED: SSH connection failed. Reason: {str(e)}")
+        socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=request.sid)
+
+# Handle tab closures safely
+@socketio.on('disconnect')
+def handle_disconnect():
+    session_id = request.sid
+    if session_id in active_sessions:
+        logging.info(f"Tab closed. Terminating SSH session for {session_id}")
+        active_sessions[session_id].close()
+        del active_sessions[session_id]
 
 if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
