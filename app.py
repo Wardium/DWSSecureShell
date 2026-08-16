@@ -24,7 +24,7 @@ active_sessions = {}
 SERVERS = {
     "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
     "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
-    "3": {"host": "192.168.2.134", "user": "dylansidneyward@outlook.com", "password": "sIjkew-1qixwe-sogcog"}
+    "3": {"host": "192.168.2.134", "user": "dylan", "password": "sIjkew-1qixwe-sogcog"}
 }
 
 @app.route('/shell/<server_id>')
