@@ -2,9 +2,9 @@ import urllib.parse
 import requests
 
 # Fill these in from Phase 1
-CLIENT_ID = "YOUR_CLIENT_ID"
-CLIENT_SECRET = "YOUR_CLIENT_SECRET"
-PROJECT_ID = "YOUR_PROJECT_ID"
+CLIENT_ID = "129761454210-26032tf9jtbc70rt04l4ahjuv85281f9.apps.googleusercontent.com""
+CLIENT_SECRET = "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"
+PROJECT_ID = "5054b2ba-0390-4474-85be-efeba8a888fd"
 
 # Step 1: Generate Login Link
 redirect_uri = "https://www.google.com"
