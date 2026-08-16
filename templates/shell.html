@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DWS Server Shell</title>
+    
+    <!-- xterm.js (Terminal Emulator) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    
+    <!-- Socket.IO (WebSocket communication) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    
+    <style>
+        /* Stripped down for iframe embedding */
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background-color: #000000;
+            overflow: hidden;
+        }
+        #terminal-container {
+            height: 100%;
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        /* Hide scrollbars for a cleaner look */
+        .xterm-viewport {
+            scrollbar-width: thin;
+            scrollbar-color: #333 #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="terminal-container"></div>
+
+    <script>
+        // Initialize Terminal with Apple font stack and high-contrast theme
+        const term = new Terminal({
+            cursorBlink: true,
+            fontFamily: '"SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace',
+            fontSize: 15,
+            theme: {
+                background: '#000000',
+                foreground: '#ffffff',
+                cursor: '#ffffff'
+            }
+        });
+        
+        // The fit addon ensures the terminal perfectly fills the iframe dimensions
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('terminal-container'));
+        fitAddon.fit();
+
+        // Handle window resizing dynamically
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+        });
+
+        // Connect to Python backend
+        const socket = io();
+
+        socket.on('connect', () => {
+            term.write('\r\n*** DWS Server Shell Initialized ***\r\n');
+            term.write('*** Connecting to Server ID: {{ server_id }} ***\r\n\r\n');
+            socket.emit('connect_ssh', { server_id: "{{ server_id }}" });
+        });
+
+        // Write incoming SSH data to the web terminal
+        socket.on('ssh_output', (data) => {
+            term.write(data.output);
+        });
+
+        // Send keystrokes back to Python
+        term.onData((data) => {
+            socket.emit('ssh_input', { input: data });
+        });
+    </script>
+</body>
+</html>
