@@ -9,7 +9,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 # --- CONFIGURATION ---
 # Define your 3 server options here. 
 SERVERS = {
-    "1": {"host": "192.168.1.10", "user": "dylan", "password": "yourpassword1"},
+    "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
     "2": {"host": "192.168.1.11", "user": "root", "password": "yourpassword2"},
     "3": {"host": "192.168.1.12", "user": "admin", "password": "yourpassword3"}
 }
