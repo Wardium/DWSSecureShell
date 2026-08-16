@@ -199,9 +199,12 @@ class GoogleHomeAPI:
         except Exception as e:
             logging.error(f"Failed to change state for {device_id}: {e}")
 
-
 if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
-    socketio.run(app, host='0.0.0.0', port=5000)
+    
+    # 1. Start the background loop FIRST
     socketio.start_background_task(device_monitor_loop)
+    
+    # 2. THEN start the main web server loop
+    socketio.run(app, host='0.0.0.0', port=5000)
 
