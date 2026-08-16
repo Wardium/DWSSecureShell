@@ -220,20 +220,22 @@ class GoogleHomeAPI:
         return jsonify({"status": "success"})
     
     def device_monitor_loop():
-    logging.info("Starting Device Enforcer background loop...")
-    while True:
-        if enforced_devices:
-            current_devices = GoogleHomeAPI.get_devices()
-            
-            for dev in current_devices:
-                dev_id = dev['id']
-                if dev_id in enforced_devices:
-                    required_state = enforced_devices[dev_id]
-                    actual_state = dev['state']
-                    
-                    if actual_state != required_state:
-                        logging.warning(f"Rebel device detected! Correcting...")
-                        GoogleHomeAPI.set_device_state(dev_id, required_state)
+        
+        logging.info("Starting Device Enforcer background loop...")
+        
+        while True:
+            if enforced_devices:
+                current_devices = GoogleHomeAPI.get_devices()
+                
+                for dev in current_devices:
+                    dev_id = dev['id']
+                    if dev_id in enforced_devices:
+                        required_state = enforced_devices[dev_id]
+                        actual_state = dev['state']
+                        
+                        if actual_state != required_state:
+                            logging.warning(f"Rebel device detected! Correcting...")
+                            GoogleHomeAPI.set_device_state(dev_id, required_state)
         
         eventlet.sleep(5)
 
