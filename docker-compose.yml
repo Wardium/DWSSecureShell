@@ -8,8 +8,8 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # This bind mount links your host directory to the container's /app directory.
-      # Any edits you make to app.py or the templates folder on the host will be instantly available on restart.
       - ./:/app
     environment:
       - PYTHONUNBUFFERED=1
+    # This configures git to trust the folder, pulls the code, then runs the app
+    command: /bin/sh -c "git config --global --add safe.directory /app && git pull && python app.py"
