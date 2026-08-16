@@ -2,3 +2,4 @@ flask
 flask-socketio
 paramiko
 eventlet
+requests
