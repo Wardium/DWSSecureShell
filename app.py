@@ -2,11 +2,13 @@
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 import paramiko
 import logging
 import sys
+import requests
+import time
 
 logging.basicConfig(
     stream=sys.stdout, 
@@ -18,9 +20,15 @@ logging.basicConfig(
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# Dictionary to track active SSH sessions so we can close them when a tab is closed
+# --- GLOBAL VARIABLES ---
+# Dictionary to track active SSH sessions
 active_sessions = {}
+# Dictionary to track what state we are forcing devices into
+enforced_devices = {}
 
+# ==========================================
+# MODULE 1: DWS Server Shell
+# ==========================================
 SERVERS = {
     "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
     "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
@@ -41,8 +49,6 @@ def handle_ssh_connection(data):
         return
 
     server = SERVERS[server_id]
-    
-    # SAVE THE SESSION ID HERE BEFORE THE BACKGROUND TASK STARTS
     client_sid = request.sid  
     
     logging.info(f"Attempting SSH connection to {server['host']}...")
@@ -63,10 +69,8 @@ def handle_ssh_connection(data):
                 try:
                     output = channel.recv(1024).decode('utf-8')
                     if output:
-                        # USE THE SAVED SESSION ID
                         socketio.emit('ssh_output', {'output': output}, to=client_sid)
                 except Exception as e:
-                    # LOG THE ACTUAL ERROR INSTEAD OF FAILING SILENTLY
                     logging.error(f"SSH listener error: {e}")
                     break
             logging.info(f"Stopped listening to SSH on {server['host']}")
@@ -80,10 +84,8 @@ def handle_ssh_connection(data):
 
     except Exception as e:
         logging.error(f"FAILED: SSH connection failed. Reason: {str(e)}")
-        # USE THE SAVED SESSION ID HERE AS WELL
         socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=client_sid)
 
-# Handle tab closures safely
 @socketio.on('disconnect')
 def handle_disconnect():
     session_id = request.sid
@@ -92,15 +94,9 @@ def handle_disconnect():
         active_sessions[session_id].close()
         del active_sessions[session_id]
 
-
-
 # ==========================================
 # MODULE 2: Device State Enforcer
 # ==========================================
-import requests
-import logging
-import time
-
 # --- GOOGLE API CREDENTIALS ---
 G_CLIENT_ID = "129761454210-26032tf9jtbc70rt04l4ahjuv85281f9.apps.googleusercontent.com"
 G_CLIENT_SECRET = "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"
@@ -114,7 +110,6 @@ class GoogleHomeAPI:
     @classmethod
     def _get_access_token(cls):
         """Silently fetches a new access token using the refresh token."""
-        # Check if we need a new token (adding a small buffer for expiry)
         if time.time() > cls._token_expiry - 60:
             logging.info("Requesting new Google Access Token...")
             url = "https://oauth2.googleapis.com/token"
@@ -154,16 +149,14 @@ class GoogleHomeAPI:
             for device in data.get('devices', []):
                 traits = device.get('traits', {})
                 
-                # We only want devices that support being turned on and off
                 if 'sdm.devices.traits.OnOff' in traits:
                     state = "on" if traits['sdm.devices.traits.OnOff'].get('isOn') else "off"
                     
-                    # Clean up the long Google ID to get a readable name
                     parent_relations = device.get('parentRelations', [])
                     name = parent_relations[0].get('displayName', 'Unknown Device') if parent_relations else 'Unknown Device'
                     
                     parsed_devices.append({
-                        "id": device['name'], # Google uses the full resource path as the ID
+                        "id": device['name'], 
                         "name": name,
                         "state": state,
                         "supports_toggle": True
@@ -186,7 +179,6 @@ class GoogleHomeAPI:
             "Content-Type": "application/json"
         }
         
-        # Google API requires strict boolean commands
         command = "sdm.devices.commands.OnOff.TurnOn" if target_state == "on" else "sdm.devices.commands.OnOff.TurnOff"
         payload = {
             "command": command,
@@ -200,52 +192,60 @@ class GoogleHomeAPI:
         except Exception as e:
             logging.error(f"Failed to change state for {device_id}: {e}")
 
-    @app.route('/devices')
-    def devices_dashboard():
-        return render_template('devices.html')
+# --- DEVICE ENFORCER ROUTES ---
+@app.route('/devices')
+def devices_dashboard():
+    return render_template('devices.html')
 
-    @app.route('/api/enforce_device', methods=['POST'])
-    def api_enforce_device():
-        data = request.json
-        device_id = data.get('id')
-        force_state = data.get('force_state') # 'on', 'off', or None
-    
-        if force_state:
-            enforced_devices[device_id] = force_state
-            logging.info(f"Enforcer activated: {device_id} MUST stay {force_state}")
-        else:
-            enforced_devices.pop(device_id, None)
-            logging.info(f"Enforcer deactivated for: {device_id}")
+@app.route('/api/get_devices', methods=['GET'])
+def api_get_devices():
+    devices = GoogleHomeAPI.get_devices()
+    for dev in devices:
+        dev['enforced'] = enforced_devices.get(dev['id'], None)
+    return jsonify(devices)
+
+@app.route('/api/enforce_device', methods=['POST'])
+def api_enforce_device():
+    data = request.json
+    device_id = data.get('id')
+    force_state = data.get('force_state') 
+
+    if force_state:
+        enforced_devices[device_id] = force_state
+        logging.info(f"Enforcer activated: {device_id} MUST stay {force_state}")
+    else:
+        enforced_devices.pop(device_id, None)
+        logging.info(f"Enforcer deactivated for: {device_id}")
+        
+    return jsonify({"status": "success"})
+
+# --- BACKGROUND MONITORING LOOP ---
+def device_monitor_loop():
+    logging.info("Starting Device Enforcer background loop...")
+    while True:
+        if enforced_devices:
+            current_devices = GoogleHomeAPI.get_devices()
             
-        return jsonify({"status": "success"})
-    
-    def device_monitor_loop():
-        
-        logging.info("Starting Device Enforcer background loop...")
-        
-        while True:
-            if enforced_devices:
-                current_devices = GoogleHomeAPI.get_devices()
-                
-                for dev in current_devices:
-                    dev_id = dev['id']
-                    if dev_id in enforced_devices:
-                        required_state = enforced_devices[dev_id]
-                        actual_state = dev['state']
-                        
-                        if actual_state != required_state:
-                            logging.warning(f"Rebel device detected! Correcting...")
-                            GoogleHomeAPI.set_device_state(dev_id, required_state)
+            for dev in current_devices:
+                dev_id = dev['id']
+                if dev_id in enforced_devices:
+                    required_state = enforced_devices[dev_id]
+                    actual_state = dev['state']
+                    
+                    if actual_state != required_state:
+                        logging.warning(f"Rebel device detected! Correcting...")
+                        GoogleHomeAPI.set_device_state(dev_id, required_state)
         
         eventlet.sleep(5)
 
-
+# ==========================================
+# APP EXECUTION
+# ==========================================
 if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
     
-    # 1. Start the background loop FIRST
+    # Start the background loop FIRST
     socketio.start_background_task(device_monitor_loop)
     
-    # 2. THEN start the main web server loop
+    # THEN start the main web server loop
     socketio.run(app, host='0.0.0.0', port=5000)
-
