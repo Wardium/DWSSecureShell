@@ -202,7 +202,7 @@ class GoogleHomeAPI:
 
     @app.route('/devices')
     def devices_dashboard():
-    return render_template('devices.html')
+        return render_template('devices.html')
 
     @app.route('/api/enforce_device', methods=['POST'])
     def api_enforce_device():
@@ -217,7 +217,7 @@ class GoogleHomeAPI:
             enforced_devices.pop(device_id, None)
             logging.info(f"Enforcer deactivated for: {device_id}")
             
-    return jsonify({"status": "success"})
+        return jsonify({"status": "success"})
     
     def device_monitor_loop():
     logging.info("Starting Device Enforcer background loop...")
