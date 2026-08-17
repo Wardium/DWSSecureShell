@@ -108,8 +108,13 @@ if __name__ == '__main__':
     
     if os.path.exists(gatekeeper_script):
         logging.info("Launching independent Gatekeeper process...")
-        # subprocess.Popen runs the script in a detached manner and immediately continues
-        subprocess.Popen([sys.executable, gatekeeper_script])
+        # close_fds=True completely severs the network sockets from the Eventlet parent
+        subprocess.Popen(
+            [sys.executable, gatekeeper_script],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            close_fds=True
+        )
     else:
         logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
     # --------------------------------------
