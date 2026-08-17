@@ -1,14 +1,28 @@
 from flask import Flask, request, render_template, redirect, url_for, make_response, jsonify
 import json
 import os
+import logging
+import sys
 from datetime import datetime
+
+# --- LOGGING SETUP ---
+logging.basicConfig(
+    stream=sys.stdout, 
+    level=logging.INFO, 
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Silence Flask's default noisy HTTP request logs
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app.secret_key = 'REPLACE_WITH_A_SECURE_SECRET_KEY'
 
 # Configuration
-USER_PASSWORD = "admin"
-ADMIN_PASSWORD = "dws13125851313241086670"
+USER_PASSWORD = "your_secret_password"
+ADMIN_PASSWORD = "your_admin_password"
 DATA_FILE = 'data/access_log.json'
 
 # Ensure data file exists
@@ -16,6 +30,7 @@ os.makedirs('data', exist_ok=True)
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, 'w') as f:
         json.dump({"allowed_ips": {}, "banned_ips": {}, "attempts": {}}, f)
+    logging.info("[Gatekeeper] Created new access_log.json database.")
 
 def load_data():
     with open(DATA_FILE, 'r') as f:
@@ -26,20 +41,26 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def get_client_ip():
-    # Nginx Proxy Manager passes the real IP here
-    return request.headers.get('X-Original-Remote-Addr', request.remote_addr)
+    # Try to get the real IP passed from Nginx Proxy Manager first
+    forwarded_ip = request.headers.get('X-Original-Remote-Addr')
+    if forwarded_ip:
+        return forwarded_ip
+    return request.remote_addr
 
 @app.route('/auth')
 def auth():
     """Nginx Proxy Manager hits this endpoint to check access."""
     ip = get_client_ip()
+    target_url = request.headers.get('X-Original-URI', 'Unknown URL')
     data = load_data()
     
     if ip in data['banned_ips']:
+        logging.warning(f"[Gatekeeper] Access DENIED (Banned IP) -> {ip} attempted to reach {target_url}")
         return "Banned", 403
         
     # Check IP whitelist OR valid cookie
     if ip in data['allowed_ips'] or request.cookies.get('dws_auth') == 'granted':
+        logging.info(f"[Gatekeeper] Access GRANTED -> {ip} accessing {target_url}")
         return "OK", 200
     
     # Log the unauthorized attempt
@@ -50,17 +71,18 @@ def auth():
         data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_data(data)
     
+    logging.info(f"[Gatekeeper] Access UNAUTHORIZED -> {ip} redirected to login page. (Attempt #{data['attempts'][ip]['count']})")
     return "Unauthorized", 401
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """The minimalist login page."""
     redirect_url = request.args.get('redirect', '')
+    ip = get_client_ip()
     
     if request.method == 'POST':
         password = request.form.get('password')
         if password == USER_PASSWORD:
-            ip = get_client_ip()
             data = load_data()
             
             # Whitelist IP and remove from attempts
@@ -69,20 +91,29 @@ def login():
                 del data['attempts'][ip]
             save_data(data)
             
+            logging.info(f"[Gatekeeper] SUCCESSFUL LOGIN -> {ip} entered correct password. Access permanently granted.")
+            
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
             resp.set_cookie('dws_auth', 'granted', max_age=60*60*24*365) # 1 year cookie
             return resp
+        else:
+            logging.warning(f"[Gatekeeper] FAILED LOGIN -> {ip} entered incorrect password.")
             
     return render_template('login.html', redirect_url=redirect_url)
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
     """Admin dashboard."""
+    ip = get_client_ip()
+    
     if request.method == 'POST':
         if request.form.get('password') == ADMIN_PASSWORD:
+            logging.info(f"[Gatekeeper] ADMIN ACCESS GRANTED -> {ip} entered correct admin password.")
             resp = make_response(redirect(url_for('admin')))
             resp.set_cookie('dws_admin', 'granted', max_age=60*60*24)
             return resp
+        else:
+            logging.warning(f"[Gatekeeper] FAILED ADMIN LOGIN -> {ip} entered incorrect admin password.")
             
     if request.cookies.get('dws_admin') != 'granted':
         return render_template('login.html', is_admin=True)
@@ -92,28 +123,35 @@ def admin():
 @app.route('/api/action', methods=['POST'])
 def admin_action():
     """Handles allow/ban/revoke actions from the admin panel."""
+    admin_ip = get_client_ip()
     if request.cookies.get('dws_admin') != 'granted':
+        logging.error(f"[Gatekeeper] UNAUTHORIZED API ACTION -> {admin_ip} attempted to execute an admin command without a valid cookie.")
         return jsonify({"error": "Unauthorized"}), 401
         
     action = request.json.get('action')
-    ip = request.json.get('ip')
+    target_ip = request.json.get('ip')
     name = request.json.get('name', 'Manually Added')
     data = load_data()
     
     if action == 'allow':
-        data['allowed_ips'][ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        if ip in data['attempts']: del data['attempts'][ip]
+        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} manually ALLOWED {target_ip} ({name}).")
+        data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if target_ip in data['attempts']: del data['attempts'][target_ip]
     elif action == 'revoke':
-        if ip in data['allowed_ips']: del data['allowed_ips'][ip]
+        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} REVOKED access for {target_ip}.")
+        if target_ip in data['allowed_ips']: del data['allowed_ips'][target_ip]
     elif action == 'ban':
-        data['banned_ips'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        if ip in data['allowed_ips']: del data['allowed_ips'][ip]
-        if ip in data['attempts']: del data['attempts'][ip]
+        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} BANNED {target_ip}.")
+        data['banned_ips'][target_ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if target_ip in data['allowed_ips']: del data['allowed_ips'][target_ip]
+        if target_ip in data['attempts']: del data['attempts'][target_ip]
     elif action == 'unban':
-        if ip in data['banned_ips']: del data['banned_ips'][ip]
+        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} UNBANNED {target_ip}.")
+        if target_ip in data['banned_ips']: del data['banned_ips'][target_ip]
         
     save_data(data)
     return jsonify({"status": "success"})
 
 if __name__ == '__main__':
+    logging.info("[Gatekeeper] Gatekeeper Auth Module is ONLINE and listening on port 5050.")
     app.run(host='0.0.0.0', port=5050)
