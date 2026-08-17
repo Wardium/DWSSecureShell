@@ -47,6 +47,11 @@ def get_client_ip():
         return forwarded_ip
     return request.remote_addr
 
+@app.route('/')
+def index():
+    """If someone visits the bare IP/Domain, auto-redirect to the login screen."""
+    return redirect(url_for('login'))
+
 @app.route('/auth')
 def auth():
     """Nginx Proxy Manager hits this endpoint to check access."""
