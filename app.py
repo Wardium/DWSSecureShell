@@ -9,6 +9,8 @@ import logging
 import sys
 import requests
 import time
+import subprocess
+import os
 
 logging.basicConfig(
     stream=sys.stdout, 
@@ -99,5 +101,17 @@ def handle_disconnect():
 # ==========================================
 if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
+    
+    # --- MODULE 2: Start the Gatekeeper ---
+    # Determine the absolute path to gatekeeper.py to ensure it fires reliably
+    gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
+    
+    if os.path.exists(gatekeeper_script):
+        logging.info("Launching independent Gatekeeper process...")
+        # subprocess.Popen runs the script in a detached manner and immediately continues
+        subprocess.Popen([sys.executable, gatekeeper_script])
+    else:
+        logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
+    # --------------------------------------
     
     socketio.run(app, host='0.0.0.0', port=5000)
