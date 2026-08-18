@@ -49,9 +49,14 @@ def save_data(data):
 def get_client_ip():
     # Try to get the real IP passed from Nginx Proxy Manager first
     forwarded_ip = request.headers.get('X-Original-Remote-Addr')
-    if forwarded_ip:
-        return forwarded_ip
-    return request.remote_addr
+    
+    # Fallback to X-Forwarded-For if X-Original is missing
+    if not forwarded_ip:
+        forwarded_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        
+    # Nginx sometimes chains IPs like "1.1.1.1, 10.0.0.1". We only want the first one.
+    clean_ip = forwarded_ip.split(',')[0].strip()
+    return clean_ip
 
 @app.route('/')
 def index():
