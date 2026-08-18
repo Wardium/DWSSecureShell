@@ -85,17 +85,28 @@ def auth():
         return "OK", 200
     
     # Log the unauthorized attempt
+    # Log the unauthorized attempt with IP geolocation
     if ip not in data['attempts']:
         location = "Unknown Location"
-        # Don't look up local internal IPs
-        if not ip.startswith('192.168.') and not ip.startswith('10.') and not ip.startswith('127.'):
+        # Don't look up local internal IPs (added 172. for Docker networks)
+        if not ip.startswith(('192.168.', '10.', '127.', '172.')):
             try:
-                # Quick external lookup using standard requests library
-                geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", timeout=2).json()
+                # Masquerade as a browser so free APIs don't block the request
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
+                geo_url = f"http://ip-api.com/json/{ip}?fields=status,country,city,message"
+                
+                geo_resp = requests.get(geo_url, headers=headers, timeout=5).json()
+                
                 if geo_resp.get('status') == 'success':
                     location = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
-            except Exception:
+                else:
+                    error_msg = geo_resp.get('message', 'API Rejected')
+                    location = f"Unknown ({error_msg})"
+                    logging.error(f"[Gatekeeper] GeoIP Error for {ip}: {error_msg}")
+                    
+            except Exception as e:
                 location = "Lookup Failed"
+                logging.error(f"[Gatekeeper] GeoIP Request Crashed for {ip}: {str(e)}")
         else:
             location = "Local Network"
 
