@@ -25,6 +25,12 @@ USER_PASSWORD = "weqr1234"
 ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
 
+TRUSTED_IPS = [
+    "127.0.0.1",      # Localhost
+    "192.168.2.91",   # The Physical Server IP
+    "172.18.0.1"      # The Docker Network Gateway
+]
+
 # Ensure data file exists
 os.makedirs('data', exist_ok=True)
 if not os.path.exists(DATA_FILE):
@@ -57,6 +63,11 @@ def auth():
     """Nginx Proxy Manager hits this endpoint to check access."""
     ip = get_client_ip()
     target_url = request.headers.get('X-Original-URI', 'Unknown URL')
+    
+    # --- NEW: Instant bypass for trusted server IPs ---
+    if ip in TRUSTED_IPS or ip.startswith('172.'):
+        return "OK", 200
+
     data = load_data()
     
     if ip in data['banned_ips']:
@@ -70,7 +81,24 @@ def auth():
     
     # Log the unauthorized attempt
     if ip not in data['attempts']:
-        data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1}
+        location = "Unknown Location"
+        # Don't look up local internal IPs
+        if not ip.startswith('192.168.') and not ip.startswith('10.') and not ip.startswith('127.'):
+            try:
+                # Quick external lookup using standard requests library
+                geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", timeout=2).json()
+                if geo_resp.get('status') == 'success':
+                    location = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+            except Exception:
+                location = "Lookup Failed"
+        else:
+            location = "Local Network"
+
+        data['attempts'][ip] = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+            "count": 1,
+            "location": location
+        }
     else:
         data['attempts'][ip]['count'] += 1
         data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
