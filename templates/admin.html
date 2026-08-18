@@ -10,9 +10,10 @@
             color: white;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
-        .container { display: flex; gap: 30px; }
+        .container { display: flex; gap: 30px; align-items: flex-start;}
+        .left-col { flex: 1; display: flex; flex-direction: column; gap: 30px; }
+        .right-col { flex: 1; }
         .glass-panel {
-            flex: 1;
             background: rgba(255, 255, 255, 0.05);
             backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
@@ -22,12 +23,14 @@
         }
         h2 { font-weight: 300; margin-top: 0; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 15px; }
         .item { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .item:last-child { border-bottom: none; padding-bottom: 0; }
         .actions button {
             background: rgba(255, 255, 255, 0.1);
             border: none; color: white; padding: 8px 15px; border-radius: 10px;
-            cursor: pointer; transition: 0.3s; margin-left: 5px;
+            cursor: pointer; transition: 0.3s; margin-left: 5px; font-size: 13px;
         }
         .actions button:hover { background: rgba(255, 255, 255, 0.2); }
+        .badge { background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 5px; color: #a1a1a6; }
         .btn-allow { color: #4cd964 !important; }
         .btn-revoke { color: #ff9500 !important; }
         .btn-ban { color: #ff3b30 !important; }
@@ -35,57 +38,88 @@
 </head>
 <body>
     <div class="container">
-        <!-- Active Connections Panel -->
-        <div class="glass-panel">
-            <h2>Authorized Devices</h2>
-            {% for ip, info in data.allowed_ips.items() %}
-            <div class="item">
-                <div>
-                    <strong>{{ info.name }}</strong><br>
-                    <small>{{ ip }} | Logged: {{ info.time }}</small>
+        
+        <div class="left-col">
+            
+            <div class="glass-panel">
+                <h2>Active Device Sessions (Cookies)</h2>
+                {% if data.active_sessions|length == 0 %}
+                    <p style="color: #a1a1a6; font-size: 14px;">No active device cookies.</p>
+                {% endif %}
+                {% for session_id, info in data.active_sessions.items() %}
+                <div class="item">
+                    <div>
+                        <strong>{{ info.device_info }}</strong><br>
+                        <small>IP: {{ info.ip }} | Logged: {{ info.time }}</small><br>
+                        <small style="color: #666;">ID: {{ session_id[:12] }}...</small>
+                    </div>
+                    <div class="actions">
+                        <button class="btn-revoke" onclick="sendAction('revoke_session', null, '{{ session_id }}')">Revoke Cookie</button>
+                    </div>
                 </div>
-                <div class="actions">
-                    <button class="btn-revoke" onclick="sendAction('revoke', '{{ ip }}')">Revoke</button>
-                    <button class="btn-ban" onclick="sendAction('ban', '{{ ip }}')">Ban IP</button>
-                </div>
+                {% endfor %}
             </div>
-            {% endfor %}
+
+            <div class="glass-panel">
+                <h2>Whitelisted IPs (Smart TVs)</h2>
+                {% if data.allowed_ips|length == 0 %}
+                    <p style="color: #a1a1a6; font-size: 14px;">No permanently whitelisted IPs.</p>
+                {% endif %}
+                {% for ip, info in data.allowed_ips.items() %}
+                <div class="item">
+                    <div>
+                        <strong>{{ info.name }}</strong><br>
+                        <small>{{ ip }} | Added: {{ info.time }}</small>
+                    </div>
+                    <div class="actions">
+                        <button class="btn-revoke" onclick="sendAction('revoke', '{{ ip }}')">Revoke IP</button>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
         </div>
 
-        <!-- Access Attempts Panel -->
-        <div class="glass-panel">
-            <h2>Access Attempts</h2>
-            {% for ip, info in data.attempts.items() %}
-            <div class="item">
-                <div>
-                    <strong>Unknown Device</strong> 
-                    <span style="background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 5px; color: #a1a1a6;">
-                        📍 {{ info.location if info.location else 'Unknown' }}
-                    </span>
-                    <br>
-                    <small>{{ ip }} | Attempts: {{ info.count }} | Last: {{ info.time }}</small>
+        <div class="right-col">
+            <div class="glass-panel">
+                <h2>Access Attempts (Last 5 Min)</h2>
+                {% if data.attempts|length == 0 %}
+                    <p style="color: #a1a1a6; font-size: 14px;">No unauthorized attempts detected recently.</p>
+                {% endif %}
+                {% for ip, info in data.attempts.items() %}
+                <div class="item">
+                    <div>
+                        <strong>Unknown Device</strong> 
+                        <span class="badge">📍 {{ info.location if info.location else 'Unknown' }}</span>
+                        <br>
+                        <small>{{ ip }} | Attempts: {{ info.count }} | Last: {{ info.time }}</small>
+                    </div>
+                    <div class="actions">
+                        <button class="btn-allow" onclick="allowDevice('{{ ip }}')">Allow IP</button>
+                        <button class="btn-ban" onclick="sendAction('ban', '{{ ip }}')">Ban IP</button>
+                    </div>
                 </div>
-                <div class="actions">
-                    <button class="btn-allow" onclick="allowDevice('{{ ip }}')">Allow Access</button>
-                    <button class="btn-ban" onclick="sendAction('ban', '{{ ip }}')">Ban IP</button>
-                </div>
+                {% endfor %}
             </div>
-            {% endfor %}
         </div>
+        
     </div>
 
     <script>
         function allowDevice(ip) {
-            let name = prompt("Enter a name for this device (e.g., Roku, Dylan's PC):");
-            if (name) sendAction('allow', ip, name);
+            let name = prompt("Enter a name for this device (e.g., Living Room Roku):");
+            if (name) sendAction('allow', ip, null, name);
         }
-        function sendAction(action, ip, name="") {
+        function sendAction(action, ip=null, session_id=null, name="") {
             fetch('/api/action', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: action, ip: ip, name: name})
+                body: JSON.stringify({action: action, ip: ip, session_id: session_id, name: name})
             }).then(() => window.location.reload());
         }
+        
+        // Auto-refresh the page every 30 seconds to clean up old attempts on the UI
+        setInterval(() => window.location.reload(), 30000);
     </script>
 </body>
 </html>
