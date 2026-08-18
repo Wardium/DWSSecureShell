@@ -21,8 +21,8 @@ app = Flask(__name__)
 app.secret_key = 'REPLACE_WITH_A_SECURE_SECRET_KEY'
 
 # --- CONFIGURATION ---
-USER_PASSWORD = "your_secret_password"
-ADMIN_PASSWORD = "your_admin_password"
+USER_PASSWORD = "weqr1234"
+ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
 
 TRUSTED_IPS = [
