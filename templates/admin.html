@@ -49,7 +49,9 @@
                 {% for session_id, info in data.active_sessions.items() %}
                 <div class="item">
                     <div>
-                        <strong>{{ info.device_info }}</strong><br>
+                        <strong>{{ info.device_info }}</strong>
+                        <span class="badge">{{ info.location if info.location else '📍 Unknown' }}</span>
+                        <br>
                         <small>IP: {{ info.ip }} | Logged: {{ info.time }}</small><br>
                         <small style="color: #666;">ID: {{ session_id[:12] }}...</small>
                     </div>
