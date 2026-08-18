@@ -131,22 +131,28 @@ def login():
     ip = get_client_ip()
     data = load_data()
     
-    # Check if they have a revoked/invalid cookie. If so, flag it for deletion.
     session_id = request.cookies.get('dws_auth')
     invalid_cookie = bool(session_id and session_id not in data['active_sessions'])
 
     if request.method == 'POST':
         password = request.form.get('password')
         if password == USER_PASSWORD:
-            
-            # Generate Unique Session ID for this device
             new_session_id = str(uuid.uuid4())
             user_agent = request.headers.get('User-Agent', 'Unknown Browser')
             
-            # Save session instead of IP
+            # Check for GPS coordinates submitted from the form
+            lat = request.form.get('lat')
+            lon = request.form.get('lon')
+            
+            if lat and lon and lat.strip() and lon.strip():
+                location_str = "🎯 " + get_gps_address(lat, lon)
+            else:
+                location_str = "📍 " + get_ip_location(ip)
+
             data['active_sessions'][new_session_id] = {
                 "ip": ip,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "location": location_str,
                 "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
             }
             
@@ -154,11 +160,21 @@ def login():
                 del data['attempts'][ip]
             save_data(data)
             
-            logging.info(f"[Gatekeeper] LOGIN SUCCESS -> Issued Session ID: {new_session_id[:8]}... to IP: {ip}")
+            logging.info(f"[Gatekeeper] LOGIN SUCCESS -> Issued Session ID to {ip} ({location_str})")
             
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
             resp.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com')
             return resp
+        else:
+            logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
+
+    resp = make_response(render_template('login.html', redirect_url=redirect_url))
+    
+    if invalid_cookie:
+        resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com')
+        logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
+        
+    return resp
         else:
             logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
 
@@ -184,6 +200,38 @@ def admin():
         return render_template('login.html', is_admin=True)
         
     return render_template('admin.html', data=load_data())
+
+def get_ip_location(ip):
+    """Fallback IP geolocation lookup."""
+    if ip.startswith(('192.168.', '10.', '127.', '172.')):
+        return "Local Network"
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
+        geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
+        if geo_resp.get('status') == 'success':
+            return f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+    except Exception:
+        pass
+    return "Unknown Location"
+
+def get_gps_address(lat, lon):
+    """Translates exact GPS coordinates to a physical street address using OpenStreetMap."""
+    try:
+        headers = {'User-Agent': 'DWSGatekeeperAuth/1.0'}
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
+        res = requests.get(url, headers=headers, timeout=3).json()
+        
+        address = res.get('address', {})
+        road = address.get('road', '')
+        house_num = address.get('house_number', '')
+        city = address.get('city') or address.get('town') or address.get('village', '')
+        state = address.get('state', '')
+        
+        formatted = f"{house_num} {road}, {city}, {state}".strip().strip(',')
+        return formatted if formatted else res.get('display_name', f"GPS: {lat}, {lon}")
+    except Exception as e:
+        logging.error(f"[Gatekeeper] Reverse Geocode error: {e}")
+        return f"GPS: {lat[:7]}, {lon[:7]}"
 
 @app.route('/api/action', methods=['POST'])
 def admin_action():
