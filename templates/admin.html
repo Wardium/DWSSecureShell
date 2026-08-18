@@ -58,7 +58,11 @@
             {% for ip, info in data.attempts.items() %}
             <div class="item">
                 <div>
-                    <strong>Unknown Device</strong><br>
+                    <strong>Unknown Device</strong> 
+                    <span style="background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 5px; color: #a1a1a6;">
+                        📍 {{ info.location if info.location else 'Unknown' }}
+                    </span>
+                    <br>
                     <small>{{ ip }} | Attempts: {{ info.count }} | Last: {{ info.time }}</small>
                 </div>
                 <div class="actions">
