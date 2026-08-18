@@ -49,12 +49,31 @@
 <body>
     <div class="glass-panel">
         <div class="logo">
-            <!-- Replace with your actual DWS SVG Logo -->
             <svg viewBox="0 0 24 24"><path d="M12 2L2 22h20L12 2zm0 4.5l6.5 13.5h-13L12 6.5z"/></svg>
         </div>
-        <form method="POST">
+        <form method="POST" id="loginForm">
             <input type="password" name="password" placeholder="Passcode" autofocus autocomplete="off">
+            <!-- Hidden inputs to carry GPS data if permitted -->
+            <input type="hidden" name="lat" id="gps_lat">
+            <input type="hidden" name="lon" id="gps_lon">
         </form>
     </div>
+
+    <script>
+        // Request device GPS in the background
+        if ("geolocation" in navigator) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    document.getElementById('gps_lat').value = pos.coords.latitude;
+                    document.getElementById('gps_lon').value = pos.coords.longitude;
+                },
+                (err) => {
+                    // Silently fail to IP lookup if denied or unavailable
+                    console.log("GPS Location declined or unavailable:", err.message);
+                },
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+            );
+        }
+    </script>
 </body>
 </html>
