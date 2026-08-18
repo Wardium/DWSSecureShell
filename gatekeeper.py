@@ -21,8 +21,8 @@ app = Flask(__name__)
 app.secret_key = 'REPLACE_WITH_A_SECURE_SECRET_KEY'
 
 # --- CONFIGURATION ---
-USER_PASSWORD = "weqr1234"
-ADMIN_PASSWORD = "dws13125851313241086670"
+USER_PASSWORD = "your_secret_password"
+ADMIN_PASSWORD = "your_admin_password"
 DATA_FILE = 'data/access_log.json'
 
 TRUSTED_IPS = [
@@ -31,46 +31,88 @@ TRUSTED_IPS = [
     "172.18.0.1"      
 ]
 
-# --- DATABASE MANAGEMENT ---
+# --- HELPER FUNCTIONS FOR GEOLOCATION ---
+def get_ip_location(ip):
+    if ip.startswith(('192.168.', '10.', '127.', '172.')):
+        return "Local Network"
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
+        geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
+        if geo_resp.get('status') == 'success':
+            return f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+    except Exception:
+        pass
+    return "Unknown Location"
+
+def get_gps_address(lat, lon):
+    try:
+        headers = {'User-Agent': 'DWSGatekeeperAuth/1.0'}
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
+        res = requests.get(url, headers=headers, timeout=3).json()
+        
+        address = res.get('address', {})
+        road = address.get('road', '')
+        house_num = address.get('house_number', '')
+        city = address.get('city') or address.get('town') or address.get('village', '')
+        state = address.get('state', '')
+        
+        formatted = f"{house_num} {road}, {city}, {state}".strip().strip(',')
+        return formatted if formatted else res.get('display_name', f"GPS: {lat}, {lon}")
+    except Exception as e:
+        logging.error(f"[Gatekeeper] Reverse Geocode error: {e}")
+        return f"GPS: {lat[:7]}, {lon[:7]}"
+
+# --- DATABASE MANAGEMENT (CRASH-PROOF) ---
 os.makedirs('data', exist_ok=True)
 
 def cleanup_old_attempts(data):
-    """Purges any access attempts that are older than 5 minutes."""
     now = datetime.now()
     expired_ips = []
     
-    for ip, info in data.get('attempts', {}).items():
+    for ip, info in list(data.get('attempts', {}).items()):
         try:
             last_attempt = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
             if now - last_attempt > timedelta(minutes=5):
                 expired_ips.append(ip)
-        except ValueError:
-            pass # Skip if time format is corrupted
+        except (ValueError, KeyError, TypeError):
+            expired_ips.append(ip)
             
     for ip in expired_ips:
-        del data['attempts'][ip]
+        data['attempts'].pop(ip, None)
         
     return data
 
 def load_data():
+    default_structure = {"allowed_ips": {}, "banned_ips": {}, "attempts": {}, "active_sessions": {}}
+    
     if not os.path.exists(DATA_FILE):
-        return {"allowed_ips": {}, "banned_ips": {}, "attempts": {}, "active_sessions": {}}
+        return default_structure
         
-    with open(DATA_FILE, 'r') as f:
-        data = json.load(f)
+    try:
+        with open(DATA_FILE, 'r') as f:
+            data = json.load(f)
+    except Exception as e:
+        logging.warning(f"[Gatekeeper] Database corrupted or empty ({e}). Rebuilding clean state...")
+        return default_structure
         
-    # Ensure backwards compatibility for older databases
-    if 'active_sessions' not in data:
-        data['active_sessions'] = {}
+    if not isinstance(data, dict):
+        return default_structure
         
-    # Clean up 5-minute old attempts automatically
-    data = cleanup_old_attempts(data)
-    return data
+    for key in default_structure:
+        if key not in data:
+            data[key] = {}
+            
+    return cleanup_old_attempts(data)
 
 def save_data(data):
     data = cleanup_old_attempts(data)
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    temp_file = f"{DATA_FILE}.tmp"
+    try:
+        with open(temp_file, 'w') as f:
+            json.dump(data, f, indent=4)
+        os.replace(temp_file, DATA_FILE)
+    except Exception as e:
+        logging.error(f"[Gatekeeper] Failed to save database atomically: {e}")
 
 def get_client_ip():
     forwarded_ip = request.headers.get('X-Original-Remote-Addr')
@@ -97,26 +139,15 @@ def auth():
     if ip in data['banned_ips']:
         return "Banned", 403
         
-    # Check Whitelisted IP OR Valid Session Cookie ID
     session_id = request.cookies.get('dws_auth')
     if ip in data['allowed_ips'] or (session_id and session_id in data['active_sessions']):
         return "OK", 200
     
-    # Log unauthorized attempt with GeoLocation
     if ip not in data['attempts']:
-        location = "Unknown Location"
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
-            geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
-            if geo_resp.get('status') == 'success':
-                location = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
-        except Exception:
-            location = "Lookup Failed"
-
         data['attempts'][ip] = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
             "count": 1,
-            "location": location
+            "location": "📍 " + get_ip_location(ip)
         }
     else:
         data['attempts'][ip]['count'] += 1
@@ -140,7 +171,6 @@ def login():
             new_session_id = str(uuid.uuid4())
             user_agent = request.headers.get('User-Agent', 'Unknown Browser')
             
-            # Check for GPS coordinates submitted from the form
             lat = request.form.get('lat')
             lon = request.form.get('lon')
             
@@ -175,18 +205,6 @@ def login():
         logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
         
     return resp
-        else:
-            logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
-
-    # Render login page
-    resp = make_response(render_template('login.html', redirect_url=redirect_url))
-    
-    # If their cookie was revoked, actively delete it from their browser
-    if invalid_cookie:
-        resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com')
-        logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
-        
-    return resp
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
@@ -201,38 +219,6 @@ def admin():
         
     return render_template('admin.html', data=load_data())
 
-def get_ip_location(ip):
-    """Fallback IP geolocation lookup."""
-    if ip.startswith(('192.168.', '10.', '127.', '172.')):
-        return "Local Network"
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
-        geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
-        if geo_resp.get('status') == 'success':
-            return f"{geo_resp.get('city')}, {geo_resp.get('country')}"
-    except Exception:
-        pass
-    return "Unknown Location"
-
-def get_gps_address(lat, lon):
-    """Translates exact GPS coordinates to a physical street address using OpenStreetMap."""
-    try:
-        headers = {'User-Agent': 'DWSGatekeeperAuth/1.0'}
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
-        res = requests.get(url, headers=headers, timeout=3).json()
-        
-        address = res.get('address', {})
-        road = address.get('road', '')
-        house_num = address.get('house_number', '')
-        city = address.get('city') or address.get('town') or address.get('village', '')
-        state = address.get('state', '')
-        
-        formatted = f"{house_num} {road}, {city}, {state}".strip().strip(',')
-        return formatted if formatted else res.get('display_name', f"GPS: {lat}, {lon}")
-    except Exception as e:
-        logging.error(f"[Gatekeeper] Reverse Geocode error: {e}")
-        return f"GPS: {lat[:7]}, {lon[:7]}"
-
 @app.route('/api/action', methods=['POST'])
 def admin_action():
     if request.cookies.get('dws_admin') != 'granted':
@@ -245,12 +231,10 @@ def admin_action():
     
     data = load_data()
     
-    # Device Cookie Session Management
     if action == 'revoke_session' and session_id in data['active_sessions']:
         del data['active_sessions'][session_id]
         logging.info(f"[Gatekeeper] Revoked Active Session: {session_id}")
         
-    # IP Address Management (for Rokus/Dumb TVs)
     elif action == 'allow':
         data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if target_ip in data['attempts']: del data['attempts'][target_ip]
