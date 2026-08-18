@@ -99,7 +99,7 @@ def login():
             logging.info(f"[Gatekeeper] SUCCESSFUL LOGIN -> {ip} entered correct password. Access permanently granted.")
             
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
-            resp.set_cookie('dws_auth', 'granted', max_age=60*60*24*365) # 1 year cookie
+            resp.set_cookie('dws_auth', 'granted', max_age=60*60*24*365, domain='.teamexist.com')
             return resp
         else:
             logging.warning(f"[Gatekeeper] FAILED LOGIN -> {ip} entered incorrect password.")
@@ -115,7 +115,7 @@ def admin():
         if request.form.get('password') == ADMIN_PASSWORD:
             logging.info(f"[Gatekeeper] ADMIN ACCESS GRANTED -> {ip} entered correct admin password.")
             resp = make_response(redirect(url_for('admin')))
-            resp.set_cookie('dws_admin', 'granted', max_age=60*60*24)
+            resp.set_cookie('dws_admin', 'granted', max_age=60*60*24, domain='.teamexist.com')
             return resp
         else:
             logging.warning(f"[Gatekeeper] FAILED ADMIN LOGIN -> {ip} entered incorrect admin password.")
