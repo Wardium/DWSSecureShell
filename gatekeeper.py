@@ -18,7 +18,7 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
-app.secret_key = 'REPLACE_WITH_A_SECURE_SECRET_KEY'
+app.secret_key = 'weqr1234'
 
 # --- CONFIGURATION ---
 USER_PASSWORD = "weqr1234"
