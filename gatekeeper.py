@@ -65,7 +65,7 @@ def auth():
         
     # Check IP whitelist OR valid cookie
     if ip in data['allowed_ips'] or request.cookies.get('dws_auth') == 'granted':
-        logging.info(f"[Gatekeeper] Access GRANTED -> {ip} accessing {target_url}")
+        # logging.info(f"[Gatekeeper] Access GRANTED -> {ip} accessing {target_url}")
         return "OK", 200
     
     # Log the unauthorized attempt
