@@ -3,3 +3,5 @@ flask-socketio
 paramiko
 eventlet
 requests
+gunicorn
+gevent
