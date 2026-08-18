@@ -107,10 +107,10 @@ if __name__ == '__main__':
     gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
     
     if os.path.exists(gatekeeper_script):
-        logging.info("Launching independent Gatekeeper process...")
-        # close_fds=True completely severs the network sockets from the Eventlet parent
+        logging.info("Launching high-performance concurrent Gatekeeper process via Gunicorn...")
+        # Spawns Gunicorn with 4 asynchronous gevent workers handling port 5050
         subprocess.Popen(
-            [sys.executable, gatekeeper_script],
+            ["gunicorn", "-w", "4", "-k", "gevent", "-b", "0.0.0.0:5050", "gatekeeper:app"],
             stdout=sys.stdout,
             stderr=sys.stderr,
             close_fds=True
