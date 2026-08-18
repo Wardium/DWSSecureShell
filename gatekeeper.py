@@ -3,7 +3,9 @@ import json
 import os
 import logging
 import sys
-from datetime import datetime
+import uuid
+import requests
+from datetime import datetime, timedelta
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -12,103 +14,104 @@ logging.basicConfig(
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-
-# Silence Flask's default noisy HTTP request logs
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
 app.secret_key = 'REPLACE_WITH_A_SECURE_SECRET_KEY'
 
-# Configuration
+# --- CONFIGURATION ---
 USER_PASSWORD = "weqr1234"
 ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
 
 TRUSTED_IPS = [
-    "127.0.0.1",      # Localhost
-    "192.168.2.91",   # The Physical Server IP
-    "172.18.0.1"      # The Docker Network Gateway
+    "127.0.0.1",      
+    "192.168.2.91",   
+    "172.18.0.1"      
 ]
 
-# Ensure data file exists
+# --- DATABASE MANAGEMENT ---
 os.makedirs('data', exist_ok=True)
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, 'w') as f:
-        json.dump({"allowed_ips": {}, "banned_ips": {}, "attempts": {}}, f)
-    logging.info("[Gatekeeper] Created new access_log.json database.")
+
+def cleanup_old_attempts(data):
+    """Purges any access attempts that are older than 5 minutes."""
+    now = datetime.now()
+    expired_ips = []
+    
+    for ip, info in data.get('attempts', {}).items():
+        try:
+            last_attempt = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
+            if now - last_attempt > timedelta(minutes=5):
+                expired_ips.append(ip)
+        except ValueError:
+            pass # Skip if time format is corrupted
+            
+    for ip in expired_ips:
+        del data['attempts'][ip]
+        
+    return data
 
 def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"allowed_ips": {}, "banned_ips": {}, "attempts": {}, "active_sessions": {}}
+        
     with open(DATA_FILE, 'r') as f:
-        return json.load(f)
+        data = json.load(f)
+        
+    # Ensure backwards compatibility for older databases
+    if 'active_sessions' not in data:
+        data['active_sessions'] = {}
+        
+    # Clean up 5-minute old attempts automatically
+    data = cleanup_old_attempts(data)
+    return data
 
 def save_data(data):
+    data = cleanup_old_attempts(data)
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
 def get_client_ip():
-    # Try to get the real IP passed from Nginx Proxy Manager first
     forwarded_ip = request.headers.get('X-Original-Remote-Addr')
-    
-    # Fallback to X-Forwarded-For if X-Original is missing
     if not forwarded_ip:
         forwarded_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-        
-    # Nginx sometimes chains IPs like "1.1.1.1, 10.0.0.1". We only want the first one.
-    clean_ip = forwarded_ip.split(',')[0].strip()
-    return clean_ip
+    return forwarded_ip.split(',')[0].strip()
+
+# --- ROUTES ---
 
 @app.route('/')
 def index():
-    """If someone visits the bare IP/Domain, auto-redirect to the login screen."""
     return redirect(url_for('login'))
 
 @app.route('/auth')
 def auth():
-    """Nginx Proxy Manager hits this endpoint to check access."""
     ip = get_client_ip()
     target_url = request.headers.get('X-Original-URI', 'Unknown URL')
     
-    # --- NEW: Instant bypass for trusted server IPs ---
-    if ip in TRUSTED_IPS or ip.startswith('172.'):
+    if ip in TRUSTED_IPS or ip.startswith(('172.', '10.', '192.168.')):
         return "OK", 200
 
     data = load_data()
     
     if ip in data['banned_ips']:
-        logging.warning(f"[Gatekeeper] Access DENIED (Banned IP) -> {ip} attempted to reach {target_url}")
         return "Banned", 403
         
-    # Check IP whitelist OR valid cookie
-    if ip in data['allowed_ips'] or request.cookies.get('dws_auth') == 'granted':
-        # logging.info(f"[Gatekeeper] Access GRANTED -> {ip} accessing {target_url}")
+    # Check Whitelisted IP OR Valid Session Cookie ID
+    session_id = request.cookies.get('dws_auth')
+    if ip in data['allowed_ips'] or (session_id and session_id in data['active_sessions']):
         return "OK", 200
     
-    # Log the unauthorized attempt
-    # Log the unauthorized attempt with IP geolocation
+    # Log unauthorized attempt with GeoLocation
     if ip not in data['attempts']:
         location = "Unknown Location"
-        # Don't look up local internal IPs (added 172. for Docker networks)
-        if not ip.startswith(('192.168.', '10.', '127.', '172.')):
-            try:
-                # Masquerade as a browser so free APIs don't block the request
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
-                geo_url = f"http://ip-api.com/json/{ip}?fields=status,country,city,message"
-                
-                geo_resp = requests.get(geo_url, headers=headers, timeout=5).json()
-                
-                if geo_resp.get('status') == 'success':
-                    location = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
-                else:
-                    error_msg = geo_resp.get('message', 'API Rejected')
-                    location = f"Unknown ({error_msg})"
-                    logging.error(f"[Gatekeeper] GeoIP Error for {ip}: {error_msg}")
-                    
-            except Exception as e:
-                location = "Lookup Failed"
-                logging.error(f"[Gatekeeper] GeoIP Request Crashed for {ip}: {str(e)}")
-        else:
-            location = "Local Network"
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
+            geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
+            if geo_resp.get('status') == 'success':
+                location = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+        except Exception:
+            location = "Lookup Failed"
 
         data['attempts'][ip] = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
@@ -118,51 +121,64 @@ def auth():
     else:
         data['attempts'][ip]['count'] += 1
         data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
     save_data(data)
-    
-    logging.info(f"[Gatekeeper] Access UNAUTHORIZED -> {ip} redirected to login page. (Attempt #{data['attempts'][ip]['count']})")
     return "Unauthorized", 401
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """The minimalist login page."""
     redirect_url = request.args.get('redirect', '')
     ip = get_client_ip()
+    data = load_data()
     
+    # Check if they have a revoked/invalid cookie. If so, flag it for deletion.
+    session_id = request.cookies.get('dws_auth')
+    invalid_cookie = bool(session_id and session_id not in data['active_sessions'])
+
     if request.method == 'POST':
         password = request.form.get('password')
         if password == USER_PASSWORD:
-            data = load_data()
             
-            # Whitelist IP and remove from attempts
-            data['allowed_ips'][ip] = {"name": "Auto-Logged In", "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            # Generate Unique Session ID for this device
+            new_session_id = str(uuid.uuid4())
+            user_agent = request.headers.get('User-Agent', 'Unknown Browser')
+            
+            # Save session instead of IP
+            data['active_sessions'][new_session_id] = {
+                "ip": ip,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
+            }
+            
             if ip in data['attempts']:
                 del data['attempts'][ip]
             save_data(data)
             
-            logging.info(f"[Gatekeeper] SUCCESSFUL LOGIN -> {ip} entered correct password. Access permanently granted.")
+            logging.info(f"[Gatekeeper] LOGIN SUCCESS -> Issued Session ID: {new_session_id[:8]}... to IP: {ip}")
             
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
-            resp.set_cookie('dws_auth', 'granted', max_age=60*60*24*365, domain='.teamexist.com')
+            resp.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com')
             return resp
         else:
-            logging.warning(f"[Gatekeeper] FAILED LOGIN -> {ip} entered incorrect password.")
-            
-    return render_template('login.html', redirect_url=redirect_url)
+            logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
+
+    # Render login page
+    resp = make_response(render_template('login.html', redirect_url=redirect_url))
+    
+    # If their cookie was revoked, actively delete it from their browser
+    if invalid_cookie:
+        resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com')
+        logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
+        
+    return resp
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
-    """Admin dashboard."""
-    ip = get_client_ip()
-    
     if request.method == 'POST':
         if request.form.get('password') == ADMIN_PASSWORD:
-            logging.info(f"[Gatekeeper] ADMIN ACCESS GRANTED -> {ip} entered correct admin password.")
             resp = make_response(redirect(url_for('admin')))
             resp.set_cookie('dws_admin', 'granted', max_age=60*60*24, domain='.teamexist.com')
             return resp
-        else:
-            logging.warning(f"[Gatekeeper] FAILED ADMIN LOGIN -> {ip} entered incorrect admin password.")
             
     if request.cookies.get('dws_admin') != 'granted':
         return render_template('login.html', is_admin=True)
@@ -171,32 +187,31 @@ def admin():
 
 @app.route('/api/action', methods=['POST'])
 def admin_action():
-    """Handles allow/ban/revoke actions from the admin panel."""
-    admin_ip = get_client_ip()
     if request.cookies.get('dws_admin') != 'granted':
-        logging.error(f"[Gatekeeper] UNAUTHORIZED API ACTION -> {admin_ip} attempted to execute an admin command without a valid cookie.")
         return jsonify({"error": "Unauthorized"}), 401
         
     action = request.json.get('action')
     target_ip = request.json.get('ip')
+    session_id = request.json.get('session_id')
     name = request.json.get('name', 'Manually Added')
+    
     data = load_data()
     
-    if action == 'allow':
-        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} manually ALLOWED {target_ip} ({name}).")
+    # Device Cookie Session Management
+    if action == 'revoke_session' and session_id in data['active_sessions']:
+        del data['active_sessions'][session_id]
+        logging.info(f"[Gatekeeper] Revoked Active Session: {session_id}")
+        
+    # IP Address Management (for Rokus/Dumb TVs)
+    elif action == 'allow':
         data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if target_ip in data['attempts']: del data['attempts'][target_ip]
     elif action == 'revoke':
-        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} REVOKED access for {target_ip}.")
         if target_ip in data['allowed_ips']: del data['allowed_ips'][target_ip]
     elif action == 'ban':
-        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} BANNED {target_ip}.")
         data['banned_ips'][target_ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         if target_ip in data['allowed_ips']: del data['allowed_ips'][target_ip]
         if target_ip in data['attempts']: del data['attempts'][target_ip]
-    elif action == 'unban':
-        logging.info(f"[Gatekeeper] ADMIN ACTION -> {admin_ip} UNBANNED {target_ip}.")
-        if target_ip in data['banned_ips']: del data['banned_ips'][target_ip]
         
     save_data(data)
     return jsonify({"status": "success"})
