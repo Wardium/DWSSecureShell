@@ -106,13 +106,18 @@ def load_data():
 
 def save_data(data):
     data = cleanup_old_attempts(data)
-    temp_file = f"{DATA_FILE}.tmp"
+    # Generate a unique temp file name so concurrent workers don't collide
+    temp_file = f"{DATA_FILE}.{uuid.uuid4().hex}.tmp"
     try:
         with open(temp_file, 'w') as f:
             json.dump(data, f, indent=4)
+        # Atomically replace the main file
         os.replace(temp_file, DATA_FILE)
     except Exception as e:
         logging.error(f"[Gatekeeper] Failed to save database atomically: {e}")
+        # Clean up the dangling temp file if something went wrong
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
 
 def get_client_ip():
     forwarded_ip = request.headers.get('X-Original-Remote-Addr')
