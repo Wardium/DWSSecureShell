@@ -12,5 +12,6 @@ services:
       - ./:/app
     environment:
       - PYTHONUNBUFFERED=1
+      - TZ=America/Vancouver
     # This configures git to trust the folder, pulls the code, then runs the app
     command: /bin/sh -c "git config --global --add safe.directory /app && git pull && python app.py"
