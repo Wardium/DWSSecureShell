@@ -7,6 +7,13 @@ import uuid
 import requests
 from datetime import datetime, timedelta
 
+# Define your allowed whitelist
+ALLOWED_ORIGINS = [
+    "https://teamexist.com",
+    "https://www.teamexist.com"
+]
+
+
 # --- LOGGING SETUP ---
 logging.basicConfig(
     stream=sys.stdout, 
@@ -210,6 +217,49 @@ def login():
         logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
         
     return resp
+
+@app.route('/api/verify', methods=['POST', 'OPTIONS'])
+def verify_access():
+    origin = request.headers.get('Origin')
+
+    # Handle CORS Preflight (OPTIONS request) for the browser
+    if request.method == 'OPTIONS':
+        if origin in ALLOWED_ORIGINS:
+            response = make_response()
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+            response.headers.add("Access-Control-Allow-Methods", "POST")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+            return response
+        return jsonify({"error": "Origin not allowed"}), 403
+
+    # 1. The Whitelist Check
+    if origin not in ALLOWED_ORIGINS:
+        return jsonify({"error": "Unauthorized origin"}), 403
+
+    # 2. Extract the Cookie Token
+    session_token = request.cookies.get('dws_auth_token')
+
+    # 3. Process User Data & Token Validation
+    # (Insert your custom token verification logic here)
+    is_valid = check_token(session_token) 
+
+    # 4. The Response
+    if is_valid:
+        response = jsonify({
+            "authorized": True,
+            "dashboard_url": "https://dashboard.teamexist.com"
+        })
+    else:
+        response = jsonify({
+            "authorized": False
+        })
+
+    # Ensure the browser accepts the cross-origin response
+    response.headers.add("Access-Control-Allow-Origin", origin)
+    response.headers.add("Access-Control-Allow-Credentials", "true")
+    
+    return response
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
