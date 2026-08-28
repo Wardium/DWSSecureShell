@@ -248,7 +248,7 @@ def verify_access():
     if is_valid:
         response = jsonify({
             "authorized": True,
-            "dashboard_url": "https://dashboard.teamexist.com"
+            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com"
         })
     else:
         response = jsonify({
