@@ -205,7 +205,7 @@ def login():
             logging.info(f"[Gatekeeper] LOGIN SUCCESS -> Issued Session ID to {ip} ({location_str})")
             
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
-            resp.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com')
+            resp.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com', samesite='None', secure=True)
             return resp
         else:
             logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
@@ -213,7 +213,7 @@ def login():
     resp = make_response(render_template('login.html', redirect_url=redirect_url))
     
     if invalid_cookie:
-        resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com')
+        resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com', samesite='None', secure=True)
         logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
         
     return resp
@@ -294,7 +294,7 @@ def admin():
     if request.method == 'POST':
         if request.form.get('password') == ADMIN_PASSWORD:
             resp = make_response(redirect(url_for('admin')))
-            resp.set_cookie('dws_admin', 'granted', max_age=60*60*24, domain='.teamexist.com')
+            resp.set_cookie('dws_admin', 'granted', max_age=60*60*24, domain='.teamexist.com', samesite='None', secure=True)
             return resp
             
     if request.cookies.get('dws_admin') != 'granted':
