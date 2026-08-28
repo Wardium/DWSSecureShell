@@ -218,76 +218,66 @@ def login():
         
     return resp
 
-@app.route('/api/verify', methods=['POST', 'OPTIONS'])
-def verify_access():
-    origin = request.headers.get('Origin')
-
-    # Handle CORS Preflight (OPTIONS request) for the browser
-    if request.method == 'OPTIONS':
-        if origin in ALLOWED_ORIGINS:
-            response = make_response()
-            response.headers.add("Access-Control-Allow-Origin", origin)
-            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-            response.headers.add("Access-Control-Allow-Methods", "POST")
-            response.headers.add("Access-Control-Allow-Credentials", "true")
-            return response
-        return jsonify({"error": "Origin not allowed"}), 403
-
-    # 1. The Whitelist Check
-    if origin not in ALLOWED_ORIGINS:
-        return jsonify({"error": "Unauthorized origin"}), 403
-
-    # 2. Extract the Cookie Token
-    session_token = request.cookies.get('dws_auth_token')
-
-    # 3. Process User Data & Token Validation
-    # (Insert your custom token verification logic here)
-    is_valid = check_token(session_token) 
-
-    # 4. The Response
-    if is_valid:
-        response = jsonify({
-            "authorized": True,
-            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com"
-        })
-    else:
-        response = jsonify({
-            "authorized": False
-        })
-
-    # Ensure the browser accepts the cross-origin response
-    response.headers.add("Access-Control-Allow-Origin", origin)
-    response.headers.add("Access-Control-Allow-Credentials", "true")
-    
-    return response
-
 def check_token(token):
-    # Immediately reject if no cookie was sent
+    print(f"[Gatekeeper] 3. Checking token string: {token}", flush=True)
+    
     if not token:
+        print("[Gatekeeper] -> Result: FAILED. No token was provided by the browser.", flush=True)
         return False
         
-    # Define the path to your JSON log file
     log_path = os.path.join("data", "access_log.json")
     
     try:
-        # Open and parse the JSON file
         with open(log_path, "r") as file:
             log_data = json.load(file)
             
-        # Extract the active sessions dictionary
         active_sessions = log_data.get("active_sessions", {})
         
-        # If the token exists as a key in active_sessions, they are authorized
         if token in active_sessions:
+            # We can even pull data from the JSON file to confirm who it matched!
+            session_info = active_sessions[token]
+            matched_ip = session_info.get('ip', 'Unknown IP')
+            print(f"[Gatekeeper] -> Result: SUCCESS. Token matched active session for IP: {matched_ip}", flush=True)
             return True
+        else:
+            print("[Gatekeeper] -> Result: FAILED. Token not found in active_sessions dictionary.", flush=True)
             
     except FileNotFoundError:
-        print(f"Error: Could not find {log_path}. Check your file paths.")
+        print(f"[Gatekeeper] -> Error: Could not find {log_path}", flush=True)
     except json.JSONDecodeError:
-        print(f"Error: {log_path} is currently locked or contains invalid JSON.")
+        print(f"[Gatekeeper] -> Error: {log_path} contains invalid JSON", flush=True)
         
-    # Default to False if anything fails or the token isn't found
     return False
+
+@app.route('/api/verify', methods=['POST'])
+def verify_access():
+    print(f"\n[Gatekeeper] 1. --- New Authorization Request ---", flush=True)
+    
+    # Grab the real IP since you are behind Nginx Proxy Manager
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    origin = request.headers.get('Origin', 'Unknown Origin')
+    
+    print(f"[Gatekeeper] 2. Request from IP: {client_ip} | Origin: {origin}", flush=True)
+
+    # Extract the cookie
+    session_token = request.cookies.get('dws_auth_token')
+    
+    # Run the validation
+    is_valid = check_token(session_token) 
+
+    # Return the final decision
+    if is_valid:
+        print("[Gatekeeper] 4. Access GRANTED. Sending dashboard URL payload.", flush=True)
+        return jsonify({
+            "authorized": True,
+            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com" 
+        })
+    else:
+        print("[Gatekeeper] 4. Access DENIED. Sending unauthorized payload.", flush=True)
+        return jsonify({
+            "authorized": False
+        })
+
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
