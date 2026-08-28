@@ -269,7 +269,7 @@ def verify_access():
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     print(f"[Gatekeeper] 2. Request from IP: {client_ip} | Origin: {origin}", flush=True)
 
-    session_token = request.cookies.get('dws_auth_token')
+    session_token = request.cookies.get('dws_auth')
     is_valid = check_token(session_token) 
 
     if is_valid:
