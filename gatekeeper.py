@@ -249,34 +249,48 @@ def check_token(token):
         
     return False
 
-@app.route('/api/verify', methods=['POST'])
+@app.route('/api/verify', methods=['POST', 'OPTIONS'])
 def verify_access():
     print(f"\n[Gatekeeper] 1. --- New Authorization Request ---", flush=True)
     
-    # Grab the real IP since you are behind Nginx Proxy Manager
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    origin = request.headers.get('Origin', 'Unknown Origin')
+    origin = request.headers.get('Origin')
     
+    # --- 1. Handle the Browser's Preflight Check ---
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+            response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+        
+    # --- 2. Standard POST Processing ---
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     print(f"[Gatekeeper] 2. Request from IP: {client_ip} | Origin: {origin}", flush=True)
 
-    # Extract the cookie
     session_token = request.cookies.get('dws_auth_token')
-    
-    # Run the validation
     is_valid = check_token(session_token) 
 
-    # Return the final decision
     if is_valid:
-        print("[Gatekeeper] 4. Access GRANTED. Sending dashboard URL payload.", flush=True)
-        return jsonify({
+        print("[Gatekeeper] 4. Access GRANTED.", flush=True)
+        # Remember to update this to your actual dashboard URL
+        response = jsonify({
             "authorized": True,
             "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com" 
         })
     else:
-        print("[Gatekeeper] 4. Access DENIED. Sending unauthorized payload.", flush=True)
-        return jsonify({
+        print("[Gatekeeper] 4. Access DENIED.", flush=True)
+        response = jsonify({
             "authorized": False
         })
+        
+    # --- 3. Force the Headers on the Final Output ---
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        
+    return response
 
 
 @app.route('/admin', methods=['GET', 'POST'])
