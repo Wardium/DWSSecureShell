@@ -261,6 +261,34 @@ def verify_access():
     
     return response
 
+def check_token(token):
+    # Immediately reject if no cookie was sent
+    if not token:
+        return False
+        
+    # Define the path to your JSON log file
+    log_path = os.path.join("data", "access_log.json")
+    
+    try:
+        # Open and parse the JSON file
+        with open(log_path, "r") as file:
+            log_data = json.load(file)
+            
+        # Extract the active sessions dictionary
+        active_sessions = log_data.get("active_sessions", {})
+        
+        # If the token exists as a key in active_sessions, they are authorized
+        if token in active_sessions:
+            return True
+            
+    except FileNotFoundError:
+        print(f"Error: Could not find {log_path}. Check your file paths.")
+    except json.JSONDecodeError:
+        print(f"Error: {log_path} is currently locked or contains invalid JSON.")
+        
+    # Default to False if anything fails or the token isn't found
+    return False
+
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
     if request.method == 'POST':
