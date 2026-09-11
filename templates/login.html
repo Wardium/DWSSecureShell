@@ -15,6 +15,7 @@
         }
         
         /* Lock Shackle */
+        /* Lock Shackle */
         .glass-panel::before {
             content: '';
             position: absolute;
@@ -23,16 +24,10 @@
             transform: translateX(-50%);
             width: 200px;
             height: 80px;
-            background: rgba(255, 255, 255, 0.05); /* Matches glass panel */
+            border: 12px solid rgba(255, 255, 255, 0.2);
+            border-bottom: none;
             border-top-left-radius: 50px;
             border-top-right-radius: 50px;
-            box-shadow: 0 -8px 32px 0 rgba(0, 0, 0, 0.3), 
-                        inset 0 0 0 1px rgba(255, 255, 255, 0.1); /* Inner light edge */
-            
-            /* This cuts out the center to make it a true arch */
-            -webkit-mask-image: radial-gradient(circle at 50% 100%, transparent 60px, black 61px);
-            mask-image: radial-gradient(circle at 50% 100%, transparent 60px, black 61px);
-            
             z-index: -1;
             transition: transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
