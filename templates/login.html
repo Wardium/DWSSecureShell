@@ -14,22 +14,54 @@
             overflow: hidden;
         }
         
-        /* Lock Shackle */
-        /* Lock Shackle */
+        /* Shackle Architecture */
         .glass-panel::before {
             content: '';
             position: absolute;
             top: -110px;
             left: 50%;
             transform: translateX(-50%);
-            width: 200px;
-            height: 80px;
-            border: 20px solid rgba(255, 255, 255, 0.2);
+            width: 140px;
+            height: 100px;
+            
+            /* Frosted glass body with inner & outer borders */
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            
+            /* Border on the outer arch */
+            border: 1px solid rgba(255, 255, 255, 0.2);
             border-bottom: none;
-            border-top-left-radius: 50px;
-            border-top-right-radius: 50px;
+            border-top-left-radius: 70px;
+            border-top-right-radius: 70px;
+            
+            /* Hollow out the center while maintaining exact thickness */
+            --tube-thickness: 20px;
+            -webkit-mask: radial-gradient(
+                farthest-side at 50% 100%,
+                transparent calc(100% - var(--tube-thickness) - 1px),
+                #fff calc(100% - var(--tube-thickness))
+            );
+            mask: radial-gradient(
+                farthest-side at 50% 100%,
+                transparent calc(100% - var(--tube-thickness) - 1px),
+                #fff calc(100% - var(--tube-thickness))
+            );
+        
+            /* Hugs the actual curved tube silhouette instead of a rectangular box */
+            filter: drop-shadow(0 -4px 12px rgba(0, 0, 0, 0.35))
+                    drop-shadow(0 0 1px rgba(255, 255, 255, 0.2));
+                    
             z-index: -1;
+            transform-origin: 20px 100%;
             transition: transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        
+        /* Unlock State: lifts and pops open around the hinge */
+        .unlocked::before {
+            transform: translateX(-50%) translateY(-28px) rotate(-22deg);
+            filter: drop-shadow(0 -6px 16px rgba(0, 0, 0, 0.45))
+                    drop-shadow(0 0 2px rgba(255, 255, 255, 0.4));
         }
         
         .glass-panel {
@@ -44,12 +76,6 @@
             text-align: center;
             animation: fadein 1s ease-out;
             transition: transform 0.5s ease;
-        }
-
-        /* Unlock Animations */
-        .unlocked::before {
-            transform: translateX(-50%) translateY(-30px) rotate(-15deg);
-            border-color: rgba(255, 255, 255, 0.5);
         }
 
         .unlocked {
