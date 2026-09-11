@@ -85,6 +85,20 @@
     </div>
 
     <script>
+        // Request device GPS in the background
+        if ("geolocation" in navigator) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    document.getElementById('gps_lat').value = pos.coords.latitude;
+                    document.getElementById('gps_lon').value = pos.coords.longitude;
+                },
+                (err) => {
+                    // Silently fail to IP lookup if denied or unavailable
+                    console.log("GPS Location declined or unavailable:", err.message);
+                },
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+            );
+        
         // GPS Script omitted for brevity
 
         async function handleLogin(event) {
