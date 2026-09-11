@@ -14,18 +14,17 @@
             overflow: hidden;
         }
         
-        /* 1. MAIN PANEL (Upgraded with Hazy Glow) */
+        /* 1. MAIN PANEL (Hazy Glow) */
         .glass-panel {
             position: relative;
-            background: rgba(255, 255, 255, 0.08); /* Slightly more opaque for haziness */
+            background: rgba(255, 255, 255, 0.08); 
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border: 1px solid rgba(255, 255, 255, 0.15);
-            border-top: 1px solid rgba(255, 255, 255, 0.4); /* Stronger glowy rim */
+            border-top: 1px solid rgba(255, 255, 255, 0.4); 
             border-radius: 24px;
             padding: 40px;
             
-            /* Outer dark shadow + Outer light glow + Inner hazy glow */
             box-shadow: 
                 0 16px 40px 0 rgba(0, 0, 0, 0.4), 
                 0 0 30px rgba(255, 255, 255, 0.1), 
@@ -36,23 +35,19 @@
             transition: transform 0.5s ease;
         }
 
-        /* 2. PADLOCK SHACKLE WRAPPER (Scalable Width) */
+        /* 2. PADLOCK SHACKLE WRAPPER */
         .shackle-wrapper {
             position: absolute;
-            /* Lifted higher to look distinctly separate from the base */
-            top: -130px; 
+            /* Positioned so the bottom 20px sinks behind the main panel */
+            top: -110px; 
+            height: 130px; 
             
-            /* Fits dynamically to the panel's left and right sides */
-            left: 40px; 
-            right: 40px;
-            height: 140px; 
+            left: 45px; 
+            right: 45px;
             z-index: -1;
             
-            /* Pivot on the bottom-left leg for realistic unlocking */
             transform-origin: 12px 100%;
             transition: transform 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            
-            /* Deep shadow that correctly hugs the 3D lock shape */
             filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.5));
         }
 
@@ -62,16 +57,14 @@
             inset: 0;
             box-sizing: border-box;
             
-            /* Thickness of the lock tube */
             border: 24px solid rgba(255, 255, 255, 0.08); 
-            border-bottom: none;
+            border-bottom: none; /* Flushes the bottom edge */
             border-top-left-radius: 60px;
             border-top-right-radius: 60px;
             
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             
-            /* CSS Magic: XOR masks the center out, so ONLY the 24px border actually blurs */
             -webkit-mask: 
                 linear-gradient(#fff 0 0) padding-box, 
                 linear-gradient(#fff 0 0) border-box;
@@ -85,10 +78,9 @@
         /* 4. THE CRISP 1px WHITE BORDERS */
         .shackle-lines {
             position: absolute;
-            inset: 0;
+            inset: 0; /* Outer line goes all the way to 0 at the bottom */
             pointer-events: none;
             
-            /* Outer contour line */
             border: 1px solid rgba(255, 255, 255, 0.3);
             border-bottom: none;
             border-top-left-radius: 60px;
@@ -98,19 +90,19 @@
         .shackle-lines::after {
             content: '';
             position: absolute;
-            /* Insets exactly to the inner edge of the 24px glass thickness */
-            inset: 23px; 
+            /* TOP, RIGHT, BOTTOM, LEFT - Bottom is 0 so it aligns flush with the outer line! */
+            inset: 23px 23px 0 23px; 
             
-            /* Inner contour line */
             border: 1px solid rgba(255, 255, 255, 0.3);
             border-bottom: none;
-            border-top-left-radius: 37px; /* 60px outer - 23px inset */
+            border-top-left-radius: 37px; 
             border-top-right-radius: 37px;
         }
 
         /* --- ANIMATIONS --- */
         .unlocked .shackle-wrapper {
-            transform: translateY(-30px) rotate(-15deg);
+            /* Lifts exactly out of the lock body and swings */
+            transform: translateY(-40px) rotate(-15deg);
         }
         .unlocked {
             transform: scale(0.95);
@@ -136,7 +128,7 @@
 <body>
     <div class="glass-panel" id="panel">
         
-        <!-- The Scalable Lock Architecture -->
+        <!-- Flush Padlock Shackle -->
         <div class="shackle-wrapper">
             <div class="shackle-glass"></div>
             <div class="shackle-lines"></div>
@@ -154,7 +146,6 @@
     </div>
 
     <script>
-        // Request device GPS in the background
         if ("geolocation" in navigator) {
             navigator.geolocation.getCurrentPosition(
                 (pos) => {
@@ -166,7 +157,6 @@
             );
         }
 
-        // Handle Login with Animation
         async function handleLogin(event) {
             event.preventDefault();
             const form = document.getElementById('loginForm');
@@ -178,7 +168,6 @@
             });
 
             if (response.redirected) {
-                // Success: Trigger unlock
                 document.getElementById('panel').classList.add('unlocked');
                 setTimeout(() => {
                     window.location.href = response.url;
