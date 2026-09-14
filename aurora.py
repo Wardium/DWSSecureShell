@@ -17,10 +17,10 @@ OLLAMA_URL = "http://192.168.2.134:11434/api/chat"
 DB_NAME = "aurora.db"
 
 MODEL_MAP = {
-    "DWS:Aurora": "DWS-Aurora",  # Update these if your local Ollama tags differ
-    "DWS:Swift": "phi3",
-    "DWS:Avani": "llama3:70b",
-    "DWS:Optic": "llava"
+    "Aurora": "DWS:Aurora",  # Update these if your local Ollama tags differ
+    "Swift": "DWS:Swift",
+    "Avani": "DWS:Avani",
+    "Optic": "DWS:Optic"
 }
 
 def init_db():
