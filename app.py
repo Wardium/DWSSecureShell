@@ -118,5 +118,23 @@ if __name__ == '__main__':
     else:
         logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
     # --------------------------------------
+
+    # --- MODULE 3: Start Aurora AI ---
+    # Determine the absolute path to aurora.py
+    aurora_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aurora.py')
     
+    if os.path.exists(aurora_script):
+        logging.info("Launching Aurora AI module on port 5101...")
+        # Spawns Aurora using the current Python environment (sys.executable)
+        subprocess.Popen(
+            [sys.executable, "aurora.py"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            close_fds=True
+        )
+    else:
+        logging.error(f"aurora.py not found at {aurora_script}. Skipping Aurora launch.")
+    # --------------------------------------
+    
+    # Start the main SocketIO app (blocking call)
     socketio.run(app, host='0.0.0.0', port=5000)
