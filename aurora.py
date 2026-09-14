@@ -157,5 +157,5 @@ def generate():
 
 if __name__ == '__main__':
     init_db()
-    # Host on 127.0.0.1 so it is accessible on your local network / outside world via port forwarding
-    app.run(host='0.0.0.0', port=5110, debug=True)
+    # Force port 5101 and disable the reloader so it doesn't crash in the background
+    app.run(host='0.0.0.0', port=5101, debug=True, use_reloader=False)
