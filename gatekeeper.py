@@ -292,6 +292,124 @@ def verify_access():
         
     return response
 
+# --- API AUTHENTICATION ROUTES ---
+
+@app.route('/api/login', methods=['POST', 'OPTIONS'])
+def api_login():
+    origin = request.headers.get('Origin')
+    
+    # Handle Preflight Check
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+            response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
+    req_data = request.get_json(silent=True) or {}
+    password = req_data.get('password')
+    
+    if password == USER_PASSWORD:
+        ip = get_client_ip()
+        data = load_data()
+        new_session_id = str(uuid.uuid4())
+        user_agent = request.headers.get('User-Agent', 'Unknown Browser')
+        
+        lat = req_data.get('lat')
+        lon = req_data.get('lon')
+        
+        if lat and lon and str(lat).strip() and str(lon).strip():
+            location_str = "🎯 " + get_gps_address(str(lat), str(lon))
+        else:
+            location_str = "📍 " + get_ip_location(ip)
+
+        data['active_sessions'][new_session_id] = {
+            "ip": ip,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "location": location_str,
+            "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
+        }
+        
+        if ip in data['attempts']:
+            del data['attempts'][ip]
+        save_data(data)
+        
+        logging.info(f"[Gatekeeper] API LOGIN SUCCESS -> Issued Session ID to {ip}")
+        
+        response = jsonify({
+            "status": "success", 
+            "message": "Authentication successful",
+            "token": new_session_id
+        })
+        # Set the secure cookie identically to the standard web login
+        response.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com', samesite='None', secure=True)
+        
+    else:
+        logging.warning(f"[Gatekeeper] API LOGIN FAILED -> Bad password from {get_client_ip()}")
+        response = jsonify({"status": "error", "message": "Invalid password"})
+        response.status_code = 401
+
+    # Attach CORS headers
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        
+    return response
+
+@app.route('/api/status', methods=['GET', 'OPTIONS'])
+def api_status():
+    origin = request.headers.get('Origin')
+    
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
+    session_token = request.cookies.get('dws_auth')
+    is_valid = check_token(session_token)
+    
+    response = jsonify({"logged_in": is_valid})
+    
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        
+    return response
+
+@app.route('/api/logout', methods=['POST', 'OPTIONS'])
+def api_logout():
+    origin = request.headers.get('Origin')
+    
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
+    session_token = request.cookies.get('dws_auth')
+    if session_token:
+        data = load_data()
+        if session_token in data['active_sessions']:
+            del data['active_sessions'][session_token]
+            save_data(data)
+            logging.info(f"[Gatekeeper] API LOGOUT -> Revoked Session ID: {session_token}")
+            
+    response = jsonify({"status": "success", "message": "Logged out successfully"})
+    # Instruct the browser to immediately expire the cookie
+    response.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com', samesite='None', secure=True)
+    
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        
+    return response
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
