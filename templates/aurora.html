@@ -187,7 +187,7 @@
 
         <!-- Section 3: History -->
         <div class="menu-section glass" style="flex: 1; overflow: hidden;">
-            <div class="menu-title" style="display:flex; justify-content: space-between;">
+            <div class="menu-tihttps://github.com/Wardium/DWSSecureShell/tree/maintle" style="display:flex; justify-content: space-between;">
                 <span>Chat History (7-Day Auto Delete)</span>
                 <button style="border:none; background:none; cursor:pointer;" onclick="toggleOptions()">❌</button>
             </div>
@@ -278,7 +278,7 @@
             if(!userId) return;
             
             try {
-                const res = await fetch('/api/login', {
+                const res = await fetch(API_BASE + '/api/login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({user_id: userId})
@@ -293,7 +293,7 @@
 
         async function logout() {
             try {
-                await fetch('/api/logout', {method: 'POST'});
+                await fetch(API_BASE + '/api/logout', {method: 'POST'});
                 document.getElementById('login-box').style.display = 'flex';
                 document.getElementById('logout-box').style.display = 'none';
                 document.getElementById('history-list').innerHTML = '';
@@ -307,7 +307,7 @@
             if(!getCookie('aurora_user_id')) return;
             
             try {
-                const res = await fetch('/api/history');
+                const res = await fetch(API_BASE + '/api/history');
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const history = await res.json();
                 
@@ -342,7 +342,7 @@
 
         async function toggleStar(chatId, makeStarred, btnElement) {
             try {
-                const res = await fetch(`/api/star/${chatId}`, {
+                const res = await fetch(API_BASE + `/api/star/${chatId}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({starred: makeStarred})
@@ -361,7 +361,7 @@
                 toggleOptions();
                 document.getElementById('chat-area').innerHTML = '';
                 
-                const res = await fetch(`/api/chat/${chatId}`);
+                const res = await fetch(API_BASE + `/api/chat/${chatId}`);
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const messages = await res.json();
                 
@@ -413,7 +413,7 @@
 
             try {
                 console.log("Sending request to backend...", payload);
-                const res = await fetch('/api/generate', {
+                const res = await fetch(API_BASE + '/api/generate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
