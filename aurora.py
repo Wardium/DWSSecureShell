@@ -99,7 +99,7 @@ def generate():
         model_choice = data.get('model', 'DWS:Aurora')
         message = data.get('message')
         
-        actual_model = MODEL_MAP.get(model_choice, "DWS-Aurora")
+        actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
         print(f"Targeting Local Model: {actual_model}")
 
         # 1. DB Operations
