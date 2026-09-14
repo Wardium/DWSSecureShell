@@ -196,7 +196,6 @@
             </div>
         </div>
     </div>
-
     <script>
         let currentChatId = null;
         let selectedModel = 'DWS:Aurora';
@@ -235,18 +234,25 @@
 
         // --- Image Attachment Logic ---
         function handleImage(event) {
-            const file = event.target.files[0];
-            if (!file) return;
+            try {
+                const file = event.target.files[0];
+                if (!file) return;
 
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                // Get base64 string without data:image/jpeg;base64, prefix for Ollama
-                attachedImageBase64 = e.target.result.split(',')[1];
-                document.getElementById('attach-btn').classList.add('active');
-                setModel('DWS:Optic'); // Force Optic AI
-                alert("Image attached! Model automatically set to DWS:Optic.");
-            };
-            reader.readAsDataURL(file);
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    // Get base64 string without data:image/jpeg;base64, prefix for Ollama
+                    attachedImageBase64 = e.target.result.split(',')[1];
+                    document.getElementById('attach-btn').classList.add('active');
+                    setModel('DWS:Optic'); // Force Optic AI
+                    alert("Image attached! Model automatically set to DWS:Optic.");
+                };
+                reader.onerror = function(err) {
+                    console.error("Error reading file:", err);
+                };
+                reader.readAsDataURL(file);
+            } catch (err) {
+                console.error("Error handling image attachment:", err);
+            }
         }
 
         // --- Authentication & History Logic ---
@@ -269,69 +275,100 @@
         async function login() {
             const userId = document.getElementById('user-id-input').value;
             if(!userId) return;
-            await fetch('/api/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({user_id: userId})
-            });
-            checkCookieAuth();
+            
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({user_id: userId})
+                });
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                checkCookieAuth();
+            } catch (err) {
+                console.error("Login Error:", err);
+                alert("Failed to sign in. Check console for details.");
+            }
         }
 
         async function logout() {
-            await fetch('/api/logout', {method: 'POST'});
-            document.getElementById('login-box').style.display = 'flex';
-            document.getElementById('logout-box').style.display = 'none';
-            document.getElementById('history-list').innerHTML = '';
-            newChat();
+            try {
+                await fetch('/api/logout', {method: 'POST'});
+                document.getElementById('login-box').style.display = 'flex';
+                document.getElementById('logout-box').style.display = 'none';
+                document.getElementById('history-list').innerHTML = '';
+                newChat();
+            } catch (err) {
+                console.error("Logout Error:", err);
+            }
         }
 
         async function loadHistory() {
             if(!getCookie('aurora_user_id')) return;
-            const res = await fetch('/api/history');
-            const history = await res.json();
-            const list = document.getElementById('history-list');
-            list.innerHTML = '';
             
-            history.forEach(chat => {
-                const div = document.createElement('div');
-                div.className = 'history-item';
+            try {
+                const res = await fetch('/api/history');
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                const history = await res.json();
                 
-                const titleSpan = document.createElement('span');
-                titleSpan.innerText = chat.title;
-                titleSpan.onclick = () => loadChat(chat.id);
-                titleSpan.style.flex = 1;
+                const list = document.getElementById('history-list');
+                list.innerHTML = '';
+                
+                history.forEach(chat => {
+                    const div = document.createElement('div');
+                    div.className = 'history-item';
+                    
+                    const titleSpan = document.createElement('span');
+                    titleSpan.innerText = chat.title;
+                    titleSpan.onclick = () => loadChat(chat.id);
+                    titleSpan.style.flex = 1;
 
-                const starBtn = document.createElement('button');
-                starBtn.className = 'star-btn';
-                starBtn.innerText = chat.starred ? '⭐' : '☆';
-                starBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    toggleStar(chat.id, !chat.starred, starBtn);
-                };
+                    const starBtn = document.createElement('button');
+                    starBtn.className = 'star-btn';
+                    starBtn.innerText = chat.starred ? '⭐' : '☆';
+                    starBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        toggleStar(chat.id, !chat.starred, starBtn);
+                    };
 
-                div.appendChild(titleSpan);
-                div.appendChild(starBtn);
-                list.appendChild(div);
-            });
+                    div.appendChild(titleSpan);
+                    div.appendChild(starBtn);
+                    list.appendChild(div);
+                });
+            } catch (err) {
+                console.error("Load History Error:", err);
+            }
         }
 
         async function toggleStar(chatId, makeStarred, btnElement) {
-            await fetch(`/api/star/${chatId}`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({starred: makeStarred})
-            });
-            btnElement.innerText = makeStarred ? '⭐' : '☆';
-            loadHistory(); // Reload to refresh state properly
+            try {
+                const res = await fetch(`/api/star/${chatId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({starred: makeStarred})
+                });
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                btnElement.innerText = makeStarred ? '⭐' : '☆';
+                loadHistory(); // Reload to refresh state properly
+            } catch (err) {
+                console.error("Toggle Star Error:", err);
+            }
         }
 
         async function loadChat(chatId) {
-            currentChatId = chatId;
-            toggleOptions();
-            document.getElementById('chat-area').innerHTML = '';
-            const res = await fetch(`/api/chat/${chatId}`);
-            const messages = await res.json();
-            messages.forEach(msg => appendMessage(msg.role, msg.content));
+            try {
+                currentChatId = chatId;
+                toggleOptions();
+                document.getElementById('chat-area').innerHTML = '';
+                
+                const res = await fetch(`/api/chat/${chatId}`);
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                const messages = await res.json();
+                
+                messages.forEach(msg => appendMessage(msg.role, msg.content));
+            } catch (err) {
+                console.error("Load Chat Error:", err);
+                appendMessage('bot', "Failed to load chat history. Check console for details.");
+            }
         }
 
         // --- Chatting Logic ---
@@ -374,25 +411,32 @@
             document.getElementById('loading').style.display = 'block';
 
             try {
+                console.log("Sending request to backend...", payload);
                 const res = await fetch('/api/generate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
+                
                 const data = await res.json();
+                console.log("Backend response received:", data);
                 
                 if(data.chat_id) currentChatId = data.chat_id;
                 
-                if (data.response) {
+                if (res.ok && data.response) {
                     appendMessage('bot', data.response);
                 } else {
+                    // This triggers if Flask throws a 500 error (e.g., Ollama is down)
+                    console.error("Server API Error:", data.error || res.statusText);
                     appendMessage('bot', "Error: " + (data.error || "Unknown error communicating with AI."));
                 }
             } catch (err) {
-                appendMessage('bot', "Network error connecting to the backend server.");
+                // This triggers if the frontend can't reach the Flask backend at all
+                console.error("Fetch/Network Error:", err);
+                appendMessage('bot', "Network error connecting to the backend server. Check browser console for details.");
+            } finally {
+                document.getElementById('loading').style.display = 'none';
             }
-            
-            document.getElementById('loading').style.display = 'none';
         }
     </script>
 </body>
