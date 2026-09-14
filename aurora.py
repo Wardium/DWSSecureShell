@@ -1,10 +1,12 @@
 from flask import Flask, request, jsonify, render_template, make_response
+from flask_cors import CORS
 import requests
 import sqlite3
 import datetime
 import uuid
 
 app = Flask(__name__)
+CORS(app, supports_credentials=True)
 
 # Configuration
 OLLAMA_URL = "http://192.168.2.134:11434/api/chat"
