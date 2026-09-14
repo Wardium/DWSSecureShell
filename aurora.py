@@ -12,10 +12,10 @@ DB_NAME = "aurora.db"
 
 # Map your custom names to the actual Ollama model names you have installed
 MODEL_MAP = {
-    "DWS:Aurora": "llama3",       # Base model
-    "DWS:Swift": "phi3",          # Fast model
-    "DWS:Avani": "llama3:70b",    # Smart model
-    "DWS:Optic": "llava"          # Vision model
+    "Aurora": "DWS:Aurora",        # Base model
+    "Swift": "DWS:Swift",          # Fast model
+    "Avani": "DWS:Avani",          # Smart model
+    "Optic": "DWS:Optic"           # Vision model
 }
 
 def init_db():
