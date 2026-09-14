@@ -97,6 +97,60 @@ def handle_disconnect():
         del active_sessions[session_id]
 
 # ==========================================
+# MODULE 4: Local Port Forwarding Proxy
+# ==========================================
+from flask import Response
+
+@app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def local_port_proxy(target_port, subpath=""):
+    # Route traffic to localhost on the requested port
+    target_url = f"http://127.0.0.1:{target_port}/{subpath}"
+    
+    # Forward query parameters if they exist
+    if request.query_string:
+        target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
+        
+    try:
+        # Strip the original Host header so the request appears local to the target app
+        req_headers = {key: value for key, value in request.headers if key.lower() != 'host'}
+        
+        # Forward the request to the local service
+        proxied_response = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=req_headers,
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            stream=True
+        )
+        
+        # Exclude hop-by-hop headers that shouldn't be forwarded to the client
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        resp_headers = []
+        
+        for key, value in proxied_response.raw.headers.items():
+            if key.lower() not in excluded_headers:
+                # Rewrite absolute redirects so you aren't forced back to a localhost URL
+                if key.lower() == 'location':
+                    host_replacement = f"{request.scheme}://{request.host}/port/{target_port}"
+                    value = value.replace(f"http://127.0.0.1:{target_port}", host_replacement)
+                    value = value.replace(f"http://localhost:{target_port}", host_replacement)
+                resp_headers.append((key, value))
+        
+        # Stream the response back to the client to support large files/assets seamlessly
+        return Response(
+            proxied_response.iter_content(chunk_size=10*1024), 
+            proxied_response.status_code, 
+            resp_headers
+        )
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Proxy module error connecting to local port {target_port}: {str(e)}")
+        return jsonify({"error": f"Could not reach local port {target_port}", "details": str(e)}), 502
+
+# ==========================================
 # APP EXECUTION
 # ==========================================
 if __name__ == '__main__':
