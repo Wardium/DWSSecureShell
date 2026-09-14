@@ -115,7 +115,7 @@ def local_port_proxy(target_port, subpath=""):
         # Strip the original Host header so the request appears local to the target app
         req_headers = {key: value for key, value in request.headers if key.lower() != 'host'}
         
-        # Forward the request to the local service
+        # Forward the request to the local service (added a 15-second timeout to prevent hanging)
         proxied_response = requests.request(
             method=request.method,
             url=target_url,
@@ -123,7 +123,8 @@ def local_port_proxy(target_port, subpath=""):
             data=request.get_data(),
             cookies=request.cookies,
             allow_redirects=False,
-            stream=True
+            stream=True,
+            timeout=15
         )
         
         # Exclude hop-by-hop headers that shouldn't be forwarded to the client
@@ -139,16 +140,28 @@ def local_port_proxy(target_port, subpath=""):
                     value = value.replace(f"http://localhost:{target_port}", host_replacement)
                 resp_headers.append((key, value))
         
-        # Stream the response back to the client to support large files/assets seamlessly
+        # Stream the response back to the client
         return Response(
             proxied_response.iter_content(chunk_size=10*1024), 
             proxied_response.status_code, 
             resp_headers
         )
 
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.ConnectionError:
+        logging.error(f"Proxy module: Connection Refused to port {target_port}")
+        # We use 503 here instead of 502 so Cloudflare doesn't intercept the page
+        return jsonify({
+            "error": "Connection Refused", 
+            "details": f"Port {target_port} is either not running, or it is not listening on 127.0.0.1."
+        }), 503
+        
+    except requests.exceptions.Timeout:
+        logging.error(f"Proxy module: Timeout connecting to port {target_port}")
+        return jsonify({"error": "Gateway Timeout", "details": f"Port {target_port} took too long to respond."}), 504
+        
+    except Exception as e:
         logging.error(f"Proxy module error connecting to local port {target_port}: {str(e)}")
-        return jsonify({"error": f"Could not reach local port {target_port}", "details": str(e)}), 502
+        return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 # ==========================================
 # APP EXECUTION
