@@ -10,17 +10,17 @@ app = Flask(__name__)
 CORS(app, supports_credentials=True)
 
 # ---------------------------------------------------------
-# THE LOCAL AI ADDRESS (Python talks to this, NOT the browser)
 OLLAMA_URL = "http://192.168.2.134:11434/api/chat"
 # ---------------------------------------------------------
 
 DB_NAME = "aurora.db"
 
+# Fixed: Keys now perfectly match what the frontend dropdown sends
 MODEL_MAP = {
-    "Aurora": "DWS:Aurora",  # Update these if your local Ollama tags differ
-    "Swift": "DWS:Swift",
-    "Avani": "DWS:Avani",
-    "Optic": "DWS:Optic"
+    "DWS:Aurora": "DWS:Aurora",
+    "DWS:Swift": "DWS:Swift",
+    "DWS:Avani": "DWS:Avani",
+    "DWS:Optic": "DWS:Optic"
 }
 
 def init_db():
@@ -89,6 +89,34 @@ def get_chat_messages(chat_id):
     conn.close()
     return jsonify(messages)
 
+# NEW: Added missing star route back so the star button works
+@app.route('/api/star/<chat_id>', methods=['POST'])
+def toggle_star(chat_id):
+    try:
+        starred = request.json.get('starred', True)
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("UPDATE chats SET starred = ? WHERE id = ?", (1 if starred else 0, chat_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# NEW: Added delete route
+@app.route('/api/chat/<chat_id>', methods=['DELETE'])
+def delete_chat(chat_id):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        c.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/generate', methods=['POST'])
 def generate():
     print("\n--- INCOMING REQUEST FROM BROWSER ---")
@@ -102,7 +130,6 @@ def generate():
         actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
         print(f"Targeting Local Model: {actual_model}")
 
-        # 1. DB Operations
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         
@@ -119,7 +146,6 @@ def generate():
         c.execute("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp ASC", (chat_id,))
         history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
 
-        # 2. Network request to the local AI
         payload = {
             "model": actual_model,
             "messages": history,
@@ -142,7 +168,6 @@ def generate():
             conn.close()
             return jsonify({"error": "AI returned an empty response."}), 500
         
-        # 3. Save and return
         c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
                   (chat_id, "assistant", ai_message, datetime.datetime.now()))
         conn.commit()
@@ -153,7 +178,6 @@ def generate():
         
     except requests.exceptions.RequestException as e:
         print(f"\n[NETWORK ERROR] Could not reach the local AI at {OLLAMA_URL}")
-        print(f"Details: {str(e)}")
         if 'conn' in locals(): conn.close()
         return jsonify({"error": f"Backend failed to reach local AI: {str(e)}"}), 500
         
@@ -165,5 +189,4 @@ def generate():
 
 if __name__ == '__main__':
     init_db()
-    # Forces port 5101, disables reloader to prevent background crashes
     app.run(host='0.0.0.0', port=5101, debug=True, use_reloader=False)
