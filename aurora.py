@@ -156,4 +156,4 @@ def generate():
 if __name__ == '__main__':
     init_db()
     # Host on 0.0.0.0 so it is accessible on your local network / outside world via port forwarding
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5101, debug=True)
