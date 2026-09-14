@@ -14,7 +14,7 @@
         body, html {
             margin: 0; padding: 0; height: 100%;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: linear-gradient(135deg, #ffffff, #cceeff); /* White to light blueish */
+            background: linear-gradient(135deg, #ffffff, #cceeff);
             overflow: hidden;
             color: var(--text-color);
         }
@@ -28,34 +28,8 @@
             box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.05);
         }
 
-        /* Intro Animation */
-        #intro-screen {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: #ffffff; z-index: 9999;
-            display: flex; justify-content: center; align-items: center;
-            transition: transform 1.2s cubic-bezier(0.77, 0, 0.175, 1);
-        }
-        #intro-screen.slide-up { transform: translateY(-100%); }
-        
-        .typing-text {
-            font-size: 3rem; font-weight: 300; letter-spacing: 2px;
-            border-right: 3px solid #333;
-            white-space: nowrap; overflow: hidden;
-            width: 0; animation: typing 1.5s steps(6) forwards, blink 0.75s step-end infinite;
-        }
-
-        @keyframes typing { from { width: 0 } to { width: 4.5em; } }
-        @keyframes blink { 50% { border-color: transparent } }
-
         /* Main App Layout */
         #app { height: 100%; display: flex; flex-direction: column; position: relative; }
-        
-        header {
-            padding: 15px 30px; font-size: 1.5rem; font-weight: 200; cursor: pointer;
-            z-index: 10; text-align: center; user-select: none;
-            transition: opacity 0.3s;
-        }
-        header:hover { opacity: 0.6; }
 
         #chat-area {
             flex: 1; overflow-y: auto; padding: 20px;
@@ -63,24 +37,50 @@
             padding-bottom: 120px; /* Room for bottom bar */
         }
         
-        .message { padding: 15px 20px; border-radius: 20px; max-width: 80%; line-height: 1.5; font-size: 1rem; }
-        .message.user { align-self: flex-end; background: rgba(255,255,255,0.6); border-bottom-right-radius: 4px; }
-        .message.bot { align-self: flex-start; border-bottom-left-radius: 4px; }
+        /* Bubbly Message Animation */
+        @keyframes popIn {
+            0% { opacity: 0; transform: translateY(20px) scale(0.9); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .message { 
+            padding: 15px 20px; border-radius: 20px; max-width: 80%; 
+            line-height: 1.5; font-size: 1rem;
+            animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+            transform-origin: bottom;
+        }
+        .message.user { align-self: flex-end; background: rgba(255,255,255,0.7); border-bottom-right-radius: 4px; }
+        .message.bot { align-self: flex-start; border-bottom-left-radius: 4px; background: rgba(255,255,255,0.4); }
+
+        /* Apple-style Typing Indicator */
+        .typing-indicator {
+            display: none; align-self: flex-start; gap: 5px;
+            padding: 15px 20px; border-radius: 20px; border-bottom-left-radius: 4px;
+            animation: popIn 0.3s ease-out forwards;
+        }
+        .typing-indicator .bubble {
+            width: 8px; height: 8px; background-color: #666; border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+        .typing-indicator .bubble:nth-child(1) { animation-delay: -0.32s; }
+        .typing-indicator .bubble:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
 
         /* Bottom Input Area */
         #input-container {
             position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
             width: 90%; max-width: 800px; border-radius: 30px;
             display: flex; align-items: center; padding: 10px 15px;
+            transition: transform 0.3s;
         }
 
         .icon-btn {
             width: 40px; height: 40px; border-radius: 50%; border: none;
             background: rgba(255,255,255,0.4); margin-right: 10px;
             cursor: pointer; display: flex; justify-content: center; align-items: center;
-            font-size: 1.2rem; transition: background 0.3s;
+            font-size: 1.2rem; transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-        .icon-btn:hover { background: rgba(255,255,255,0.7); }
+        .icon-btn:hover { background: rgba(255,255,255,0.8); transform: scale(1.1); }
         .icon-btn.active { background: #333; color: white; }
 
         input[type="text"] {
@@ -100,57 +100,66 @@
         }
         #options-menu.active { opacity: 1; pointer-events: all; }
         
+        /* New Bubbly Top Buttons */
+        .top-menu-bar { display: flex; justify-content: space-between; align-items: center; }
+        .bubbly-btn {
+            background: rgba(255,255,255,0.4); border: 1px solid var(--glass-border);
+            border-radius: 20px; padding: 10px 20px; cursor: pointer; font-size: 1rem;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); font-weight: 500;
+        }
+        .bubbly-btn:hover { background: rgba(255,255,255,0.8); transform: scale(1.05); }
+
         .menu-section { border-radius: 20px; padding: 20px; display: flex; flex-direction: column; gap: 15px; }
         .menu-title { font-size: 1.2rem; font-weight: 500; border-bottom: 1px solid rgba(0,0,0,0.1); padding-bottom: 10px; }
 
         .auth-box { display: flex; gap: 10px; }
         .auth-box input { border-radius: 10px; border: 1px solid var(--glass-border); padding: 10px; flex: 1; background: rgba(255,255,255,0.3); }
-        .auth-box button { border-radius: 10px; border: none; padding: 10px 20px; cursor: pointer; background: #fff; }
+        .auth-box button { border-radius: 10px; border: none; padding: 10px 20px; cursor: pointer; background: #fff; transition: 0.2s; }
+        .auth-box button:hover { transform: scale(1.05); }
 
         .model-select { display: flex; flex-direction: column; gap: 10px; }
         .model-btn {
             text-align: left; padding: 15px; border-radius: 10px; border: 1px solid var(--glass-border);
-            background: rgba(255,255,255,0.2); cursor: pointer; transition: 0.3s;
+            background: rgba(255,255,255,0.2); cursor: pointer; transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-        .model-btn.selected { background: rgba(255,255,255,0.8); font-weight: bold; }
+        .model-btn:hover { background: rgba(255,255,255,0.5); transform: translateX(5px); }
+        .model-btn.selected { background: rgba(255,255,255,0.9); font-weight: bold; transform: scale(1.02); }
 
-        #history-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+        #history-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 10px; padding-right: 5px; }
         .history-item { 
-            padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.2);
+            padding: 15px; border-radius: 10px; background: rgba(255,255,255,0.3);
             display: flex; justify-content: space-between; align-items: center; cursor: pointer;
+            transition: all 0.2s ease;
         }
-        .history-item:hover { background: rgba(255,255,255,0.4); }
-        .star-btn { font-size: 1.2rem; cursor: pointer; background: none; border: none; }
+        .history-item:hover { background: rgba(255,255,255,0.6); transform: scale(1.01); }
         
-        /* Loading animation */
-        .typing-indicator { display: none; padding: 15px; font-style: italic; color: #666; }
+        .history-actions { display: flex; gap: 10px; }
+        .action-btn { font-size: 1.2rem; cursor: pointer; background: none; border: none; transition: transform 0.2s; }
+        .action-btn:hover { transform: scale(1.2); }
 
-        /* Mobile specific styling adjustments */
         @media (max-width: 600px) {
-            #options-menu { padding: 20px; padding-top: 50px; }
+            #options-menu { padding: 20px; padding-top: 30px; }
         }
     </style>
 </head>
 <body>
 
-    <!-- Intro Overlay -->
-    <div id="intro-screen">
-        <div class="typing-text">Aurora</div>
-    </div>
-
     <div id="app">
-        <!-- Header -->
-        <header onclick="newChat()">Aurora_</header>
-
         <!-- Chat Area -->
         <main id="chat-area">
             <!-- Messages go here -->
         </main>
-        <div class="typing-indicator" id="loading">Aurora is typing...</div>
+        
+        <!-- Apple Style 3-dot Typing Indicator -->
+        <div class="typing-indicator glass" id="loading">
+            <div class="bubble"></div>
+            <div class="bubble"></div>
+            <div class="bubble"></div>
+        </div>
 
         <!-- Input Bar -->
         <div id="input-container" class="glass">
-            <button class="icon-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach Image (Forces DWS:Optic)">📷</button>
+            <button class="icon-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach Image">📷</button>
             <input type="file" id="file-input" accept="image/*" onchange="handleImage(event)">
             
             <button class="icon-btn" onclick="toggleOptions()" title="Options Menu">⚙️</button>
@@ -161,6 +170,13 @@
 
     <!-- Options Overlay -->
     <div id="options-menu" class="glass">
+        
+        <!-- New Top Bar with X and New Chat -->
+        <div class="top-menu-bar">
+            <button class="bubbly-btn glass" onclick="newChat()">➕ New Chat</button>
+            <button class="bubbly-btn glass" onclick="toggleOptions()">❌ Close</button>
+        </div>
+
         <!-- Section 1: Sign in -->
         <div class="menu-section glass">
             <div class="menu-title" id="auth-title">Sign In</div>
@@ -187,27 +203,22 @@
 
         <!-- Section 3: History -->
         <div class="menu-section glass" style="flex: 1; overflow: hidden;">
-            <div class="menu-tihttps://github.com/Wardium/DWSSecureShell/tree/maintle" style="display:flex; justify-content: space-between;">
-                <span>Chat History (7-Day Auto Delete)</span>
-                <button style="border:none; background:none; cursor:pointer;" onclick="toggleOptions()">❌</button>
-            </div>
+            <div class="menu-title">Chat History (7-Day Auto Delete)</div>
             <div id="history-list">
                 <!-- History populates here -->
             </div>
         </div>
     </div>
+
     <script>
         const API_BASE = "https://device.teamexist.com/port/5101";
         let currentChatId = null;
         let selectedModel = 'DWS:Aurora';
         let attachedImageBase64 = null;
 
-        // --- Intro Animation Logic ---
+        // Skip animation, go right to checking cookies
         window.onload = () => {
-            setTimeout(() => {
-                document.getElementById('intro-screen').classList.add('slide-up');
-                checkCookieAuth();
-            }, 2500); // Wait for typing animation to finish
+            checkCookieAuth();
         };
 
         // --- Core UI functions ---
@@ -233,7 +244,6 @@
             });
         }
 
-        // --- Image Attachment Logic ---
         function handleImage(event) {
             try {
                 const file = event.target.files[0];
@@ -241,10 +251,9 @@
 
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    // Get base64 string without data:image/jpeg;base64, prefix for Ollama
                     attachedImageBase64 = e.target.result.split(',')[1];
                     document.getElementById('attach-btn').classList.add('active');
-                    setModel('DWS:Optic'); // Force Optic AI
+                    setModel('DWS:Optic');
                     alert("Image attached! Model automatically set to DWS:Optic.");
                 };
                 reader.onerror = function(err) {
@@ -256,7 +265,6 @@
             }
         }
 
-        // --- Authentication & History Logic ---
         function getCookie(name) {
             const value = `; ${document.cookie}`;
             const parts = value.split(`; ${name}=`);
@@ -276,7 +284,6 @@
         async function login() {
             const userId = document.getElementById('user-id-input').value;
             if(!userId) return;
-            
             try {
                 const res = await fetch(API_BASE + '/api/login', {
                     method: 'POST',
@@ -316,23 +323,36 @@
                 
                 history.forEach(chat => {
                     const div = document.createElement('div');
-                    div.className = 'history-item';
+                    div.className = 'history-item glass';
                     
                     const titleSpan = document.createElement('span');
                     titleSpan.innerText = chat.title;
                     titleSpan.onclick = () => loadChat(chat.id);
                     titleSpan.style.flex = 1;
+                    
+                    const actionDiv = document.createElement('div');
+                    actionDiv.className = 'history-actions';
 
                     const starBtn = document.createElement('button');
-                    starBtn.className = 'star-btn';
+                    starBtn.className = 'action-btn';
                     starBtn.innerText = chat.starred ? '⭐' : '☆';
                     starBtn.onclick = (e) => {
                         e.stopPropagation();
                         toggleStar(chat.id, !chat.starred, starBtn);
                     };
 
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'action-btn';
+                    delBtn.innerText = '🗑️';
+                    delBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        deleteChat(chat.id);
+                    };
+
+                    actionDiv.appendChild(starBtn);
+                    actionDiv.appendChild(delBtn);
                     div.appendChild(titleSpan);
-                    div.appendChild(starBtn);
+                    div.appendChild(actionDiv);
                     list.appendChild(div);
                 });
             } catch (err) {
@@ -349,9 +369,21 @@
                 });
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 btnElement.innerText = makeStarred ? '⭐' : '☆';
-                loadHistory(); // Reload to refresh state properly
+                loadHistory(); 
             } catch (err) {
                 console.error("Toggle Star Error:", err);
+            }
+        }
+
+        async function deleteChat(chatId) {
+            if (!confirm("Are you sure you want to permanently delete this chat?")) return;
+            try {
+                const res = await fetch(API_BASE + `/api/chat/${chatId}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                if (currentChatId === chatId) newChat(); 
+                loadHistory(); 
+            } catch (err) {
+                console.error("Delete Chat Error:", err);
             }
         }
 
@@ -368,15 +400,12 @@
                 messages.forEach(msg => appendMessage(msg.role, msg.content));
             } catch (err) {
                 console.error("Load Chat Error:", err);
-                appendMessage('bot', "Failed to load chat history. Check console for details.");
+                appendMessage('bot', "Failed to load chat history.");
             }
         }
 
-        // --- Chatting Logic ---
         function handleEnter(e) {
-            if (e.key === 'Enter') {
-                sendMessage();
-            }
+            if (e.key === 'Enter') sendMessage();
         }
 
         function appendMessage(role, content) {
@@ -406,36 +435,44 @@
                 payload.images = [attachedImageBase64];
                 attachedImageBase64 = null;
                 document.getElementById('attach-btn').classList.remove('active');
-                document.getElementById('file-input').value = ""; // Reset file input
+                document.getElementById('file-input').value = ""; 
             }
 
-            document.getElementById('loading').style.display = 'block';
+            // Show Apple typing bubbles
+            document.getElementById('loading').style.display = 'flex';
+            
+            // Auto scroll down so bubbles are visible
+            const chatArea = document.getElementById('chat-area');
+            chatArea.scrollTop = chatArea.scrollHeight;
 
             try {
-                console.log("Sending request to backend...", payload);
                 const res = await fetch(API_BASE + '/api/generate', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
                 });
                 
-                const data = await res.json();
-                console.log("Backend response received:", data);
+                const rawText = await res.text();
+                let data;
+                try {
+                    data = JSON.parse(rawText);
+                } catch (parseErr) {
+                    throw new Error("Server returned a non-JSON error page.");
+                }
                 
                 if(data.chat_id) currentChatId = data.chat_id;
                 
                 if (res.ok && data.response) {
                     appendMessage('bot', data.response);
                 } else {
-                    // This triggers if Flask throws a 500 error (e.g., Ollama is down)
-                    console.error("Server API Error:", data.error || res.statusText);
-                    appendMessage('bot', "Error: " + (data.error || "Unknown error communicating with AI."));
+                    console.error("Server API Error:", data.error);
+                    appendMessage('bot', "Error: " + (data.error || "Unknown error."));
                 }
             } catch (err) {
-                // This triggers if the frontend can't reach the Flask backend at all
                 console.error("Fetch/Network Error:", err);
-                appendMessage('bot', "Network error connecting to the backend server. Check browser console for details.");
+                appendMessage('bot', "Network error connecting to the backend server.");
             } finally {
+                // Hide Apple typing bubbles
                 document.getElementById('loading').style.display = 'none';
             }
         }
