@@ -38,7 +38,7 @@
         @keyframes typing { from { width: 0 } to { width: 4.5em; } }
         @keyframes blink { 50% { border-color: transparent } }
 
-        /* Upgraded Premium Glassmorphism (Based on your provided snippet) */
+        /* Upgraded Premium Glassmorphism */
         .glass {
             background: rgba(255, 255, 255, 0.35); 
             backdrop-filter: blur(24px);
@@ -80,7 +80,7 @@
         
         /* Message Layout & Animations */
         @keyframes popIn {
-            0% { opacity: 0; transform: translateY(20px) scale(0.8); }
+            0% { opacity: 0; transform: translateY(15px) scale(0.8); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
 
@@ -89,7 +89,7 @@
             opacity: 0; /* Hidden until popIn triggers */
         }
         .message-wrapper.pop-in {
-            animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+            animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.3) forwards;
         }
         .message-wrapper.user { justify-content: flex-end; }
         .message-wrapper.bot { justify-content: flex-start; }
@@ -281,7 +281,7 @@
                 </div>
             </div>
 
-            <!-- Section 2: AI Models (Fixed with data-model tags) -->
+            <!-- Section 2: AI Models -->
             <div class="menu-section glass">
                 <div class="menu-title">Select Aurora</div>
                 <div class="model-select">
@@ -308,7 +308,7 @@
         let selectedModel = 'DWS:Aurora';
         let attachedImageBase64 = null;
 
-        // Faster Intro Logic
+        // Intro Logic
         window.onload = () => {
             setTimeout(() => {
                 document.getElementById('intro-screen').classList.add('slide-up');
@@ -320,16 +320,11 @@
         function toggleOptions() {
             const overlay = document.getElementById('options-overlay');
             overlay.classList.toggle('active');
-            if(overlay.classList.contains('active')) {
-                loadHistory();
-            }
+            if(overlay.classList.contains('active')) loadHistory();
         }
         
         function closeOverlay(e) {
-            // Only close if clicking outside the menu box
-            if(e.target === document.getElementById('options-overlay')) {
-                toggleOptions();
-            }
+            if(e.target === document.getElementById('options-overlay')) toggleOptions();
         }
 
         function newChat() {
@@ -338,14 +333,11 @@
             document.getElementById('options-overlay').classList.remove('active');
         }
 
-        // Fixed Model Selection
         function setModel(modelName) {
             selectedModel = modelName;
             document.querySelectorAll('.model-btn').forEach(btn => {
                 btn.classList.remove('selected');
-                if(btn.getAttribute('data-model') === modelName) {
-                    btn.classList.add('selected');
-                }
+                if(btn.getAttribute('data-model') === modelName) btn.classList.add('selected');
             });
         }
 
@@ -353,7 +345,6 @@
             try {
                 const file = event.target.files[0];
                 if (!file) return;
-
                 const reader = new FileReader();
                 reader.onload = function(e) {
                     attachedImageBase64 = e.target.result.split(',')[1];
@@ -361,9 +352,7 @@
                     setModel('DWS:Optic');
                 };
                 reader.readAsDataURL(file);
-            } catch (err) {
-                console.error("Error handling image attachment:", err);
-            }
+            } catch (err) { console.error("Error handling image:", err); }
         }
 
         function getCookie(name) {
@@ -419,7 +408,7 @@
                 history.forEach(chat => {
                     const div = document.createElement('div');
                     div.className = 'history-item glass float-hover';
-                    div.style.animationDuration = (4 + Math.random()*3) + 's'; // random float speed
+                    div.style.animationDuration = (4 + Math.random()*3) + 's'; 
                     
                     const titleSpan = document.createElement('span');
                     titleSpan.innerText = chat.title;
@@ -488,7 +477,7 @@
                 
                 messages.forEach(msg => {
                     const wrap = appendMessage(msg.role, msg.content);
-                    wrap.classList.add('pop-in'); // already loaded msgs animate in
+                    wrap.classList.add('pop-in'); 
                 });
             } catch (err) { console.error("Load Chat Error:", err); }
         }
@@ -497,7 +486,6 @@
             if (e.key === 'Enter') triggerSend();
         }
 
-        // Updated Message Appender for the new animation wrapper
         function appendMessage(role, content) {
             const chatArea = document.getElementById('chat-area');
             const wrapper = document.createElement('div');
@@ -505,7 +493,6 @@
             
             const bubble = document.createElement('div');
             bubble.className = `message-bubble glass float-hover`;
-            // Add slight randomness to float desynchronization
             bubble.style.animationDelay = `-${Math.random() * 2}s`;
             bubble.innerText = content;
 
@@ -514,67 +501,132 @@
             return wrapper;
         }
 
-        // Physics-based Paper Plane animation before sending
+        // --- Sophisticated Physics-Based Paper Plane Animation ---
         function triggerSend() {
             const input = document.getElementById('prompt-input');
             const message = input.value.trim();
             if (!message) return;
             input.value = '';
 
-            // Render message immediately but keep it hidden
+            // Generate message wrapper, kept hidden initially (opacity 0)
             const userMsgWrapper = appendMessage('user', message);
-            
             const sendBtn = document.getElementById('send-btn');
             const btnRect = sendBtn.getBoundingClientRect();
+            const chatArea = document.getElementById('chat-area');
             
-            // Create flying plane element
+            // Scroll down now so the target rectangle evaluates correctly
+            chatArea.scrollTop = chatArea.scrollHeight;
+            
+            const targetBubble = userMsgWrapper.querySelector('.message-bubble');
+            const targetRect = targetBubble.getBoundingClientRect();
+
+            // Create clone of paper plane to fly around
             const plane = document.createElement('div');
             plane.innerHTML = sendBtn.innerHTML;
             plane.style.position = 'fixed';
-            plane.style.left = btnRect.left + 'px';
-            plane.style.top = btnRect.top + 'px';
+            plane.style.left = '0px';
+            plane.style.top = '0px';
             plane.style.width = btnRect.width + 'px';
             plane.style.height = btnRect.height + 'px';
-            plane.style.zIndex = 2000;
+            plane.style.zIndex = '2000';
             plane.style.color = '#333';
+            plane.style.display = 'flex';
+            plane.style.justifyContent = 'center';
+            plane.style.alignItems = 'center';
             plane.style.pointerEvents = 'none';
-            // Physics-like curve: pulls back slightly then shoots fast
-            plane.style.transition = 'transform 0.5s cubic-bezier(0.5, -0.5, 0.2, 1.5), opacity 0.4s ease 0.1s';
-            
             document.body.appendChild(plane);
-            
-            // Trigger layout recalculation
-            void plane.offsetWidth;
-            
-            // Find target destination (bottom right of the invisible message we just created)
-            const targetBubble = userMsgWrapper.querySelector('.message-bubble');
-            const targetRect = targetBubble.getBoundingClientRect();
-            
-            const deltaX = (targetRect.right - 20) - (btnRect.left);
-            const deltaY = targetRect.top - btnRect.top;
 
-            // Fly the plane
-            plane.style.transform = `translate(${deltaX}px, ${deltaY}px) scale(0.3) rotate(20deg)`;
-            plane.style.opacity = '0';
+            // Origin (btn) and Destination (bubble center-right)
+            const startX = btnRect.left;
+            const startY = btnRect.top;
+            const endX = targetRect.right - (btnRect.width * 1.2); 
+            const endY = targetRect.top + (targetRect.height / 2) - (btnRect.height / 2);
 
-            // Wait for flight to finish, then pop-in the message and trigger actual API
-            setTimeout(() => {
-                plane.remove();
-                userMsgWrapper.classList.add('pop-in'); // Reveal with bubble pop!
-                const chatArea = document.getElementById('chat-area');
-                chatArea.scrollTop = chatArea.scrollHeight;
+            const steps = 70; // Smooth 60+ FPS fidelity 
+            const points = [];
+            
+            // Phase 1: Calculate coordinates using math functions
+            for (let i = 0; i <= steps; i++) {
+                let t = i / steps;
                 
+                // easeOutQuart: Fast start, slows heavily right at the target
+                let easeT = 1 - Math.pow(1 - t, 4); 
+                
+                // Base direct interpolation
+                let bx = startX + (endX - startX) * easeT;
+                let by = startY + (endY - startY) * easeT;
+                
+                // The Loop: Sine wave logic. 
+                // X: swings right, curves left (center), then pushes right again
+                // Y: arches drastically up over the middle section
+                let loopX = Math.sin(t * Math.PI * 2) * 120; 
+                let loopY = -Math.sin(t * Math.PI) * 220;
+                
+                // The Wiggle: Fast flutter that phases in mid-flight and settles at ends
+                let wiggleFactor = Math.sin(t * Math.PI); // 0 at ends, 1 in middle
+                let wiggleX = Math.cos(t * Math.PI * 14) * 6 * wiggleFactor;
+                let wiggleY = Math.sin(t * Math.PI * 14) * 6 * wiggleFactor;
+                
+                points.push({
+                    x: bx + loopX + wiggleX,
+                    y: by + loopY + wiggleY,
+                    t: t
+                });
+            }
+
+            // Phase 2: Compute heading angle frame-by-frame & build animation payload
+            const keyframes = [];
+            for (let i = 0; i <= steps; i++) {
+                let p = points[i];
+                let prevP = points[Math.max(i - 1, 0)];
+                let nextP = points[Math.min(i + 1, steps)];
+                
+                let dx, dy;
+                if (i === steps) {
+                    dx = p.x - prevP.x; dy = p.y - prevP.y;
+                } else if (i === 0) {
+                    dx = nextP.x - p.x; dy = nextP.y - p.y;
+                } else {
+                    dx = nextP.x - prevP.x; dy = nextP.y - prevP.y;
+                }
+                
+                // Original SVG points top-right (-45 deg). atan2(0,1) is right (0 deg).
+                // So when pointing right, we must rotate the SVG by +45 deg to align.
+                let angle = Math.atan2(dy, dx) * (180 / Math.PI) + 45;
+                
+                // The Pop effect at the final moments
+                let scale = 0.9;
+                let opacity = 1;
+                if (i > steps - 5) { 
+                    let pop = (i - (steps - 5)) / 5; // scales 0 -> 1 over last few frames
+                    scale = 0.9 + pop * 0.8; // Expands outward
+                    opacity = 1 - pop;       // Fades out
+                }
+
+                keyframes.push({
+                    transform: `translate(${p.x}px, ${p.y}px) rotate(${angle}deg) scale(${scale})`,
+                    opacity: opacity
+                });
+            }
+
+            // Phase 3: Execute via Web Animations API
+            const anim = plane.animate(keyframes, {
+                duration: 1100, // Just over 1 second 
+                easing: 'linear',
+                fill: 'forwards'
+            });
+
+            anim.onfinish = () => {
+                plane.remove();
+                // Pop the message into existence precisely as the plane disappears
+                userMsgWrapper.classList.add('pop-in');
+                chatArea.scrollTop = chatArea.scrollHeight;
                 executeApiCall(message);
-            }, 450); // Slightly faster than the transition for a snappy feel
+            };
         }
 
-        // Modified execute flow to show inline typing indicator
         async function executeApiCall(message) {
-            const payload = {
-                chat_id: currentChatId,
-                model: selectedModel,
-                message: message
-            };
+            const payload = { chat_id: currentChatId, model: selectedModel, message: message };
 
             if (attachedImageBase64) {
                 payload.images = [attachedImageBase64];
@@ -586,7 +638,6 @@
             const chatArea = document.getElementById('chat-area');
             const loadingInd = document.getElementById('loading');
             
-            // Move typing indicator to bottom of chat area and show it
             loadingInd.style.display = 'flex';
             chatArea.appendChild(loadingInd);
             chatArea.scrollTop = chatArea.scrollHeight;
@@ -604,7 +655,6 @@
                 
                 if(data.chat_id) currentChatId = data.chat_id;
                 
-                // Hide indicator before appending the bot's response
                 loadingInd.style.display = 'none';
 
                 if (res.ok && data.response) {
