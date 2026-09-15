@@ -181,7 +181,7 @@ def generate():
         }
         
         print(f"Attempting to contact local AI at: {OLLAMA_URL}...")
-        response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        response = requests.post(OLLAMA_URL, json=payload, timeout=500)
         
         if response.status_code != 200:
             error_msg = f"AI Server rejected request. Status: {response.status_code}, Details: {response.text}"
