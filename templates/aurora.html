@@ -21,7 +21,7 @@
 
         /* Responsive Scaling for Mobile (Zoom Out Effect) */
         @media (max-width: 768px) {
-            html { font-size: 14px; } /* Scales down standard sizes */
+            html { font-size: 14px; }
             #input-container { width: 95%; padding: 8px 12px; }
             .message-bubble { max-width: 90% !important; padding: 12px 16px !important; }
             header { font-size: 1.3rem !important; padding: 10px !important; }
@@ -75,18 +75,21 @@
         #app { height: 100%; display: flex; flex-direction: column; position: relative; }
 
         header {
+            /* Changed to shrink-wrap the text so it rotates exactly around the center */
+            align-self: center; 
             padding: 15px 30px; font-size: 1.5rem; font-weight: 200; cursor: pointer;
             z-index: 10; text-align: center; user-select: none;
             transition: opacity 0.3s, color 0.3s;
+            transform-origin: center;
         }
         header:hover { opacity: 0.6; }
 
         /* Header Shaking Animation */
         @keyframes shake {
             0% { transform: translate(0, 0) rotate(0deg); }
-            25% { transform: translate(1px, 1px) rotate(1deg); }
-            50% { transform: translate(0, 0) rotate(0eg); }
-            75% { transform: translate(-1px, -1px) rotate(-1deg); }
+            25% { transform: translate(1px, 1px) rotate(2deg); }
+            50% { transform: translate(0, 0) rotate(0deg); }
+            75% { transform: translate(-1px, -1px) rotate(-2deg); }
             100% { transform: translate(0, 0) rotate(0deg); }
         }
         header.shaking {
@@ -98,7 +101,7 @@
         #chat-area {
             flex: 1; overflow-y: auto; padding: 20px;
             display: flex; flex-direction: column; gap: 20px;
-            padding-bottom: 140px; /* Room for floating bottom bar */
+            padding-bottom: 140px; 
         }
         
         /* Message Layout & Animations */
@@ -109,7 +112,7 @@
 
         .message-wrapper {
             display: flex; width: 100%;
-            opacity: 0; /* Hidden until popIn triggers */
+            opacity: 0; 
         }
         .message-wrapper.pop-in {
             animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.3) forwards;
@@ -121,7 +124,7 @@
             padding: 15px 20px; border-radius: 24px; max-width: 75%; 
             line-height: 1.5; font-size: 1rem;
             position: relative;
-            white-space: pre-wrap; /* Keeps user's newlines visible */
+            white-space: pre-wrap; 
         }
         
         .message-wrapper.user .message-bubble { 
@@ -158,15 +161,17 @@
         .icon-btn:hover { background: rgba(255,255,255,0.9); transform: scale(1.1); opacity: 0.8; }
         .icon-btn.active { background: #333; color: white; opacity: 1;}
 
-        /* Multi-line Textarea instead of Input */
+        /* Multi-line Textarea (Fixed resizing glitch) */
         textarea {
             flex: 1; background: transparent; border: none; outline: none;
-            font-size: 1rem; padding: 10px; color: #333;
-            resize: none; font-family: inherit;
+            font-size: 1rem; color: #333; resize: none; font-family: inherit;
+            height: 42px; /* Hard lock to button height initially */
+            box-sizing: border-box; /* Crucial for strict padding calculation */
+            padding: 10px 5px; 
+            line-height: 22px; /* 10+10 padding + 22 height = 42 exactly */
             max-height: 120px; overflow-y: auto;
             margin-bottom: 2px;
         }
-        /* Hide scrollbar for cleaner look */
         textarea::-webkit-scrollbar { width: 0; }
         
         #file-input { display: none; }
@@ -258,8 +263,7 @@
                     <svg class="svg-icon" viewBox="0 0 24.75 24.75"><path d="M0,3.875c0-1.104,0.896-2,2-2h20.75c1.104,0,2,0.896,2,2s-0.896,2-2,2H2C0.896,5.875,0,4.979,0,3.875z M22.75,10.375H2 c-1.104,0-2,0.896-2,2c0,1.104,0.896,2,2,2h20.75c1.104,0,2-0.896,2-2C24.75,11.271,23.855,10.375,22.75,10.375z M22.75,18.875H2 c-1.104,0-2,0.896-2,2s0.896,2,2,2h20.75c1.104,0,2-0.896,2-2S23.855,18.875,22.75,18.875z"></path></svg>
                 </button>
                 
-                <!-- Replaced text input with auto-expanding textarea -->
-                <textarea id="prompt-input" rows="1" placeholder="Message..." oninput="this.style.height = ''; this.style.height = Math.min(this.scrollHeight, 120) + 'px';"></textarea>
+                <textarea id="prompt-input" rows="1" placeholder="Message..." oninput="autoResize(this)" onkeydown="handleKeyDown(event)"></textarea>
 
                 <button class="icon-btn" id="send-btn" onclick="triggerSend()" title="Send Message">
                     <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -327,6 +331,24 @@
                 checkCookieAuth();
             }, 1200); 
         };
+
+        // --- Keyboard Handling ---
+        function autoResize(el) {
+            el.style.height = '42px'; // Temporarily shrink to measure true height
+            if (el.scrollHeight > 42) {
+                el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+            }
+        }
+
+        function handleKeyDown(e) {
+            // Check if user is on a precision pointer device (aka Desktop/Laptop mouse)
+            const isDesktop = window.matchMedia("(pointer: fine)").matches;
+            
+            if (isDesktop && e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault(); // Prevents typing a new line
+                triggerSend();
+            }
+        }
 
         // --- Core UI functions ---
         function toggleOptions() {
@@ -516,7 +538,7 @@
             if (!message) return;
             
             input.value = '';
-            input.style.height = ''; // reset textarea height
+            input.style.height = '42px'; // Firmly reset textarea height
 
             const userMsgWrapper = appendMessage('user', message);
             const sendBtn = document.getElementById('send-btn');
@@ -611,40 +633,40 @@
             };
         }
 
-        // --- NEW: Physics-Based Paper Plane Animation (Receiving) ---
+        // --- Physics-Based Paper Plane Animation (Receiving) ---
         function triggerReceive(botMessageText) {
             const chatArea = document.getElementById('chat-area');
             const botMsgWrapper = appendMessage('bot', botMessageText);
             
-            // Scroll so the new message box is in the exact right spot
             chatArea.scrollTop = chatArea.scrollHeight;
             
             const targetBubble = botMsgWrapper.querySelector('.message-bubble');
             const targetRect = targetBubble.getBoundingClientRect();
             const header = document.getElementById('main-header');
             const headerRect = header.getBoundingClientRect();
-            const sendBtn = document.getElementById('send-btn'); // Just borrowing the SVG from here
+            const sendBtn = document.getElementById('send-btn'); 
 
             const plane = document.createElement('div');
             plane.innerHTML = sendBtn.innerHTML;
             plane.style.position = 'fixed';
             plane.style.left = '0px';
             plane.style.top = '0px';
-            plane.style.width = '42px'; // Default button size
+            plane.style.width = '42px'; 
             plane.style.height = '42px';
             plane.style.zIndex = '2000';
-            plane.style.color = '#333';
+            
+            // --- NEW: Make the return plane white and glowing ---
+            plane.style.color = 'white'; 
+            plane.style.filter = 'drop-shadow(0px 0px 8px rgba(255, 255, 255, 0.9))';
+            
             plane.style.display = 'flex';
             plane.style.justifyContent = 'center';
             plane.style.alignItems = 'center';
             plane.style.pointerEvents = 'none';
             document.body.appendChild(plane);
 
-            // Plane spawns at bottom-center of the Header
             const startX = headerRect.left + (headerRect.width / 2) - 21; 
             const startY = headerRect.bottom - 10;
-            
-            // Destination is the left-center of the new bot message bubble
             const endX = targetRect.left + 10; 
             const endY = targetRect.top + (targetRect.height / 2) - 21;
 
@@ -653,24 +675,16 @@
             const depthModifier = Math.random() < 0.5 ? 0.6 : -0.6;
             const baseScale = 1.2; 
 
-            // Calculate flight path (Downward Arc)
             for (let i = 0; i <= steps; i++) {
                 let t = i / steps;
-                
-                // easeInOut: starts smooth, ends smooth
                 let easeT = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; 
-                
                 let bx = startX + (endX - startX) * easeT;
                 let by = startY + (endY - startY) * easeT;
-                
-                // Swooping downward arc
-                let loopX = Math.sin(t * Math.PI * 2) * -120; // Swing left
-                let loopY = Math.sin(t * Math.PI) * 150;      // Swing down
-                
+                let loopX = Math.sin(t * Math.PI * 2) * -120; 
+                let loopY = Math.sin(t * Math.PI) * 150;      
                 let wiggleFactor = Math.sin(t * Math.PI); 
                 let wiggleX = Math.cos(t * Math.PI * 14) * 6 * wiggleFactor;
                 let wiggleY = Math.sin(t * Math.PI * 14) * 6 * wiggleFactor;
-                
                 points.push({ x: bx + loopX + wiggleX, y: by + loopY + wiggleY, t: t });
             }
 
@@ -693,12 +707,8 @@
                 let currentScale = baseScale + (Math.sin(p.t * Math.PI) * depthModifier);
                 let opacity = 1;
 
-                // Spawns from nothing at the header
-                if (i < 10) {
-                    currentScale = currentScale * (i / 10);
-                }
+                if (i < 10) { currentScale = currentScale * (i / 10); }
 
-                // Pops at the end
                 if (i > steps - 5) { 
                     let pop = (i - (steps - 5)) / 5; 
                     currentScale = currentScale + (pop * 1.0); 
