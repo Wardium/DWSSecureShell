@@ -166,6 +166,14 @@
         @media (max-width: 600px) {
             #options-menu { padding: 20px; padding-top: 30px; }
         }
+        .svg-icon {
+            width: 1em;
+            height: 1em;
+            fill: currentColor;
+            vertical-align: -0.125em; /* Drops it slightly to align with the text baseline */
+            display: inline-block;
+          }
+        
     </style>
 </head>
 <body>
@@ -193,10 +201,10 @@
 
         <!-- Input Bar -->
         <div id="input-container" class="glass">
-            <button class="icon-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach Image">📷</button>
+            <button class="icon-btn" id="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach Image"><svg class="svg-icon" viewBox="0 0 256 256" id="Flat" xmlns="http://www.w3.org/2000/svg"><g id="SVGRepo_bgCarrier" stroke-width="0"></g><g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g><g id="SVGRepo_iconCarrier"> <path d="M213.65723,66.34326l-40-40A8.00076,8.00076,0,0,0,168,24H88A16.01833,16.01833,0,0,0,72,40V56H56A16.01833,16.01833,0,0,0,40,72V216a16.01833,16.01833,0,0,0,16,16H168a16.01833,16.01833,0,0,0,16-16V200h16a16.01833,16.01833,0,0,0,16-16V72A8.00035,8.00035,0,0,0,213.65723,66.34326ZM136,192H88a8,8,0,0,1,0-16h48a8,8,0,0,1,0,16Zm0-32H88a8,8,0,0,1,0-16h48a8,8,0,0,1,0,16Zm64,24H184V104a8.00035,8.00035,0,0,0-2.34277-5.65674l-40-40A8.00076,8.00076,0,0,0,136,56H88V40h76.68652L200,75.314Z"></path> </g></svg></button>
             <input type="file" id="file-input" accept="image/*" onchange="handleImage(event)">
             
-            <button class="icon-btn" onclick="toggleOptions()" title="Options Menu">⚙️</button>
+            <button class="icon-btn" onclick="toggleOptions()" title="Options Menu"><svg class="svg-icon" version="1.1" id="Capa_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24.75 24.75" xml:space="preserve"><g id="SVGRepo_bgCarrier" stroke-width="0"></g><g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g><g id="SVGRepo_iconCarrier"> <g> <path d="M0,3.875c0-1.104,0.896-2,2-2h20.75c1.104,0,2,0.896,2,2s-0.896,2-2,2H2C0.896,5.875,0,4.979,0,3.875z M22.75,10.375H2 c-1.104,0-2,0.896-2,2c0,1.104,0.896,2,2,2h20.75c1.104,0,2-0.896,2-2C24.75,11.271,23.855,10.375,22.75,10.375z M22.75,18.875H2 c-1.104,0-2,0.896-2,2s0.896,2,2,2h20.75c1.104,0,2-0.896,2-2S23.855,18.875,22.75,18.875z"></path> </g> </g></svg></button>
             
             <input type="text" id="prompt-input" placeholder="Message Aurora..." onkeypress="handleEnter(event)">
         </div>
@@ -207,8 +215,8 @@
         
         <!-- Top Bar with X and New Chat -->
         <div class="top-menu-bar">
-            <button class="bubbly-btn glass" onclick="newChat()">➕ New Chat</button>
-            <button class="bubbly-btn glass" onclick="toggleOptions()">❌ Close</button>
+            <button class="bubbly-btn glass" onclick="newChat()">New Chat</button>
+            <button class="bubbly-btn glass" onclick="toggleOptions()">Close</button>
         </div>
 
         <!-- Section 1: Sign in -->
@@ -226,18 +234,18 @@
 
         <!-- Section 2: AI Models -->
         <div class="menu-section glass">
-            <div class="menu-title">Select AI Model</div>
+            <div class="menu-title">Select Aurora</div>
             <div class="model-select">
-                <button class="model-btn selected" onclick="setModel('DWS:Aurora')">DWS:Aurora (Base)</button>
-                <button class="model-btn" onclick="setModel('DWS:Swift')">DWS:Swift (Quick)</button>
-                <button class="model-btn" onclick="setModel('DWS:Avani')">DWS:Avani (Smartest)</button>
-                <button class="model-btn" onclick="setModel('DWS:Optic')">DWS:Optic (Image Sensing)</button>
+                <button class="model-btn selected" onclick="setModel('DWS:Aurora')">Aurora (Base)</button>
+                <button class="model-btn" onclick="setModel('DWS:Swift')">Swift (Quick)</button>
+                <button class="model-btn" onclick="setModel('DWS:Avani')">Avani (Smartest)</button>
+                <button class="model-btn" onclick="setModel('DWS:Optic')">Optic (Image Sensing)</button>
             </div>
         </div>
 
         <!-- Section 3: History -->
         <div class="menu-section glass" style="flex: 1; overflow: hidden;">
-            <div class="menu-title">Chat History (7-Day Auto Delete)</div>
+            <div class="menu-title">Coversation History</div>
             <div id="history-list">
                 <!-- History populates here -->
             </div>
