@@ -502,6 +502,7 @@
             return wrapper;
         }
 
+        
         // --- Sophisticated Physics-Based Paper Plane Animation ---
         function triggerSend() {
             const input = document.getElementById('prompt-input');
@@ -546,6 +547,11 @@
             const steps = 70; // Smooth 60+ FPS fidelity 
             const points = [];
             
+            // --- NEW: 3D Depth Setup ---
+            // 50/50 chance to either fly "closer" (+0.6 scale) or "further" (-0.6 scale)
+            const depthModifier = Math.random() < 0.5 ? 0.6 : -0.6;
+            const baseScale = 1.2; // Base size is now larger than before!
+
             // Phase 1: Calculate coordinates using math functions
             for (let i = 0; i <= steps; i++) {
                 let t = i / steps;
@@ -558,8 +564,6 @@
                 let by = startY + (endY - startY) * easeT;
                 
                 // The Loop: Sine wave logic. 
-                // X: swings right, curves left (center), then pushes right again
-                // Y: arches drastically up over the middle section
                 let loopX = Math.sin(t * Math.PI * 2) * 120; 
                 let loopY = -Math.sin(t * Math.PI) * 220;
                 
@@ -571,7 +575,7 @@
                 points.push({
                     x: bx + loopX + wiggleX,
                     y: by + loopY + wiggleY,
-                    t: t
+                    t: t // Save 't' so we can use it for scaling in phase 2
                 });
             }
 
@@ -591,21 +595,22 @@
                     dx = nextP.x - prevP.x; dy = nextP.y - prevP.y;
                 }
                 
-                // Original SVG points top-right (-45 deg). atan2(0,1) is right (0 deg).
-                // So when pointing right, we must rotate the SVG by +45 deg to align.
                 let angle = Math.atan2(dy, dx) * (180 / Math.PI) + 45;
                 
-                // The Pop effect at the final moments
-                let scale = 0.9;
+                // --- NEW: Apply the 3D depth scale ---
+                // Math.sin(p.t * Math.PI) creates a curve that starts at 0, peaks at 1 in the middle, and ends at 0
+                let currentScale = baseScale + (Math.sin(p.t * Math.PI) * depthModifier);
                 let opacity = 1;
+
+                // The Pop effect at the final moments
                 if (i > steps - 5) { 
                     let pop = (i - (steps - 5)) / 5; // scales 0 -> 1 over last few frames
-                    scale = 0.9 + pop * 0.8; // Expands outward
+                    currentScale = currentScale + (pop * 1.0); // Expands outward from its current size
                     opacity = 1 - pop;       // Fades out
                 }
 
                 keyframes.push({
-                    transform: `translate(${p.x}px, ${p.y}px) rotate(${angle}deg) scale(${scale})`,
+                    transform: `translate(${p.x}px, ${p.y}px) rotate(${angle}deg) scale(${currentScale})`,
                     opacity: opacity
                 });
             }
