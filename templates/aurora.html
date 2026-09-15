@@ -99,10 +99,6 @@
             line-height: 1.5; font-size: 1rem;
             position: relative;
         }
-
-        #paperplane {
-            opacity: 0.5;
-        }
         
         .message-wrapper.user .message-bubble { 
             border-bottom-right-radius: 6px; 
@@ -146,7 +142,7 @@
             cursor: pointer; display: flex; justify-content: center; align-items: center;
             font-size: 1.2rem; transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-        #send-btn { margin-right: 0; margin-left: 10px; opacity: 0.9; }
+        #send-btn { margin-right: 0; margin-left: 10px; opacity: 0.5; }
         
         .icon-btn:hover { background: rgba(255,255,255,0.9); transform: scale(1.1); opacity: 0.8; }
         .icon-btn.active { background: #333; color: white; opacity: 1;}
@@ -254,7 +250,7 @@
                 
                 <input type="text" id="prompt-input" placeholder="Message..." onkeypress="handleEnter(event)">
 
-                <button id="paperplane" class="icon-btn" id="send-btn" onclick="triggerSend()" title="Send Message">
+                <button class="icon-btn" id="send-btn" onclick="triggerSend()" title="Send Message">
                     <svg class="svg-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="22" y1="2" x2="11" y2="13"></line>
                         <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
