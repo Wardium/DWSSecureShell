@@ -15,7 +15,6 @@ OLLAMA_URL = "http://192.168.2.134:11434/api/chat"
 
 DB_NAME = "aurora.db"
 
-# Fixed: Keys now perfectly match what the frontend dropdown sends
 MODEL_MAP = {
     "DWS:Aurora": "DWS:Aurora",
     "DWS:Swift": "DWS:Swift",
@@ -45,29 +44,56 @@ def cleanup_old_history():
     conn.commit()
     conn.close()
 
+# --- API HELPER FUNCTION ---
+def get_current_user():
+    """Extracts user_id from Headers, JSON payload, or Cookies (for web)."""
+    # 1. API Header check
+    api_user = request.headers.get('X-User-Id')
+    if api_user:
+        return api_user
+    
+    # 2. JSON payload check
+    if request.is_json and request.json and 'user_id' in request.json:
+        return request.json['user_id']
+        
+    # 3. Fallback to web cookie
+    return request.cookies.get('aurora_user_id', 'anonymous')
+
 @app.route('/')
 def index():
     return render_template('aurora.html')
 
+# --- API ENDPOINTS ---
+
 @app.route('/api/login', methods=['POST'])
 def login():
     user_id = request.json.get('user_id', '').strip()
-    resp = make_response(jsonify({"success": True, "user_id": user_id}))
+    if not user_id:
+        return jsonify({"error": "user_id is required"}), 400
+        
+    # Returns the user_id as an API token for external clients
+    resp = make_response(jsonify({"success": True, "token": user_id, "user_id": user_id}))
+    # Still sets the cookie for the web frontend
     resp.set_cookie('aurora_user_id', user_id, max_age=60*60*24*365)
     return resp
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    resp = make_response(jsonify({"success": True}))
+    resp = make_response(jsonify({"success": True, "message": "Logged out successfully"}))
     resp.set_cookie('aurora_user_id', '', expires=0)
     return resp
+
+@app.route('/api/models', methods=['GET'])
+def get_models():
+    """API endpoint to fetch available models."""
+    return jsonify({"success": True, "models": list(MODEL_MAP.keys())})
 
 @app.route('/api/history', methods=['GET'])
 def get_history():
     try:
         cleanup_old_history()
-        user_id = request.cookies.get('aurora_user_id')
-        if not user_id:
+        user_id = get_current_user()
+        if user_id == 'anonymous':
             return jsonify([])
 
         conn = sqlite3.connect(DB_NAME)
@@ -89,7 +115,6 @@ def get_chat_messages(chat_id):
     conn.close()
     return jsonify(messages)
 
-# NEW: Added missing star route back so the star button works
 @app.route('/api/star/<chat_id>', methods=['POST'])
 def toggle_star(chat_id):
     try:
@@ -103,7 +128,6 @@ def toggle_star(chat_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# NEW: Added delete route
 @app.route('/api/chat/<chat_id>', methods=['DELETE'])
 def delete_chat(chat_id):
     try:
@@ -119,16 +143,20 @@ def delete_chat(chat_id):
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
-    print("\n--- INCOMING REQUEST FROM BROWSER ---")
+    print("\n--- INCOMING API REQUEST ---")
     try:
-        user_id = request.cookies.get('aurora_user_id', 'anonymous')
+        # Uses the new helper function to support API headers, JSON, or cookies
+        user_id = get_current_user()
         data = request.json
         chat_id = data.get('chat_id')
         model_choice = data.get('model', 'DWS:Aurora')
         message = data.get('message')
         
+        if not message:
+            return jsonify({"error": "Message content is required"}), 400
+            
         actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
-        print(f"Targeting Local Model: {actual_model}")
+        print(f"User: {user_id} | Targeting Local Model: {actual_model}")
 
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -173,8 +201,8 @@ def generate():
         conn.commit()
         conn.close()
         
-        print("Successfully generated response. Sending back to browser.")
-        return jsonify({"chat_id": chat_id, "response": ai_message})
+        print("Successfully generated response. Sending back to client.")
+        return jsonify({"success": True, "chat_id": chat_id, "model": actual_model, "response": ai_message})
         
     except requests.exceptions.RequestException as e:
         print(f"\n[NETWORK ERROR] Could not reach the local AI at {OLLAMA_URL}")
