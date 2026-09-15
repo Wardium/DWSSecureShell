@@ -101,12 +101,13 @@
         }
 
         .icon-btn {
+            opacity: 0.5;
             width: 40px; height: 40px; border-radius: 50%; border: none;
-            background: rgba(255,255,255,0.4); margin-right: 10px;
+            background: rgba(255,255,255,0.2); margin-right: 10px;
             cursor: pointer; display: flex; justify-content: center; align-items: center;
             font-size: 1.2rem; transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-        .icon-btn:hover { background: rgba(255,255,255,0.8); transform: scale(1.1); }
+        .icon-btn:hover { background: rgba(255,255,255,0.6); transform: scale(1.1); opacity: 0.85; }
         .icon-btn.active { background: #333; color: white; }
 
         input[type="text"] {
@@ -206,7 +207,7 @@
             
             <button class="icon-btn" onclick="toggleOptions()" title="Options Menu"><svg class="svg-icon" version="1.1" id="Capa_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24.75 24.75" xml:space="preserve"><g id="SVGRepo_bgCarrier" stroke-width="0"></g><g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g><g id="SVGRepo_iconCarrier"> <g> <path d="M0,3.875c0-1.104,0.896-2,2-2h20.75c1.104,0,2,0.896,2,2s-0.896,2-2,2H2C0.896,5.875,0,4.979,0,3.875z M22.75,10.375H2 c-1.104,0-2,0.896-2,2c0,1.104,0.896,2,2,2h20.75c1.104,0,2-0.896,2-2C24.75,11.271,23.855,10.375,22.75,10.375z M22.75,18.875H2 c-1.104,0-2,0.896-2,2s0.896,2,2,2h20.75c1.104,0,2-0.896,2-2S23.855,18.875,22.75,18.875z"></path> </g> </g></svg></button>
             
-            <input type="text" id="prompt-input" placeholder="Message Aurora..." onkeypress="handleEnter(event)">
+            <input type="text" id="prompt-input" placeholder="Message..." onkeypress="handleEnter(event)">
         </div>
     </div>
 
