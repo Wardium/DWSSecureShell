@@ -1,10 +1,11 @@
-from flask import Flask, request, jsonify, render_template, make_response
+from flask import Flask, request, jsonify, render_template, make_response, Response, stream_with_context
 from flask_cors import CORS
 import requests
 import sqlite3
 import datetime
 import uuid
 import traceback
+import json
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -143,77 +144,86 @@ def delete_chat(chat_id):
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
-    print("\n--- INCOMING API REQUEST ---")
-    try:
-        # Uses the new helper function to support API headers, JSON, or cookies
-        user_id = get_current_user()
-        data = request.json
-        chat_id = data.get('chat_id')
-        model_choice = data.get('model', 'DWS:Aurora')
-        message = data.get('message')
+    print("\n--- INCOMING API REQUEST (STREAMING) ---")
+    
+    user_id = get_current_user()
+    data = request.json
+    chat_id = data.get('chat_id')
+    model_choice = data.get('model', 'DWS:Aurora')
+    message = data.get('message')
+    
+    if not message:
+        return jsonify({"error": "Message content is required"}), 400
         
-        if not message:
-            return jsonify({"error": "Message content is required"}), 400
+    actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
+    print(f"User: {user_id} | Targeting Local Model: {actual_model}")
+
+    # 1. DB Operations (Closed before streaming to prevent locks)
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    if not chat_id:
+        chat_id = str(uuid.uuid4())
+        title = message[:30] + "..." if len(message) > 30 else message
+        c.execute("INSERT INTO chats (id, user_id, title, created_at, starred) VALUES (?, ?, ?, ?, 0)",
+                  (chat_id, user_id, title, datetime.datetime.now()))
+    
+    c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+              (chat_id, "user", message, datetime.datetime.now()))
+    conn.commit()
+
+    c.execute("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp ASC", (chat_id,))
+    history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
+    conn.close()
+
+    payload = {
+        "model": actual_model,
+        "messages": history,
+        "stream": True # <--- ENABLE OLLAMA STREAMING
+    }
+    
+    # 2. Setup the stream generator
+    def generate_stream():
+        try:
+            yield json.dumps({"type": "start", "chat_id": chat_id}) + "\n"
             
-        actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
-        print(f"User: {user_id} | Targeting Local Model: {actual_model}")
-
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        
-        if not chat_id:
-            chat_id = str(uuid.uuid4())
-            title = message[:30] + "..." if len(message) > 30 else message
-            c.execute("INSERT INTO chats (id, user_id, title, created_at, starred) VALUES (?, ?, ?, ?, 0)",
-                      (chat_id, user_id, title, datetime.datetime.now()))
-        
-        c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                  (chat_id, "user", message, datetime.datetime.now()))
-        conn.commit()
-
-        c.execute("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp ASC", (chat_id,))
-        history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
-
-        payload = {
-            "model": actual_model,
-            "messages": history,
-            "stream": False
-        }
-        
-        print(f"Attempting to contact local AI at: {OLLAMA_URL}...")
-        response = requests.post(OLLAMA_URL, json=payload, timeout=500)
-        
-        if response.status_code != 200:
-            error_msg = f"AI Server rejected request. Status: {response.status_code}, Details: {response.text}"
-            print(error_msg)
-            conn.close()
-            return jsonify({"error": error_msg}), 500
+            full_ai_message = ""
+            print(f"Attempting to contact local AI at: {OLLAMA_URL}...")
             
-        ai_message = response.json().get('message', {}).get('content', '')
-        
-        if not ai_message:
-            print("AI responded, but the message was blank.")
-            conn.close()
-            return jsonify({"error": "AI returned an empty response."}), 500
-        
-        c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                  (chat_id, "assistant", ai_message, datetime.datetime.now()))
-        conn.commit()
-        conn.close()
-        
-        print("Successfully generated response. Sending back to client.")
-        return jsonify({"success": True, "chat_id": chat_id, "model": actual_model, "response": ai_message})
-        
-    except requests.exceptions.RequestException as e:
-        print(f"\n[NETWORK ERROR] Could not reach the local AI at {OLLAMA_URL}")
-        if 'conn' in locals(): conn.close()
-        return jsonify({"error": f"Backend failed to reach local AI: {str(e)}"}), 500
-        
-    except Exception as e:
-        print("\n[CRITICAL ERROR] The Python server crashed!")
-        traceback.print_exc()
-        if 'conn' in locals(): conn.close()
-        return jsonify({"error": f"Python script crash: {str(e)}"}), 500
+            with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=500) as response:
+                if response.status_code != 200:
+                    yield json.dumps({"type": "error", "content": f"AI Server rejected request. Status: {response.status_code}"}) + "\n"
+                    return
+                
+                # Stream the words directly to the browser
+                for line in response.iter_lines():
+                    if line:
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        full_ai_message += content
+                        yield json.dumps({"type": "chunk", "content": content}) + "\n"
+            
+            # 3. Save the final message to the database
+            save_conn = sqlite3.connect(DB_NAME)
+            save_c = save_conn.cursor()
+            save_c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                      (chat_id, "assistant", full_ai_message, datetime.datetime.now()))
+            save_conn.commit()
+            save_conn.close()
+            
+            print("Successfully finished streaming response.")
+            yield json.dumps({"type": "done"}) + "\n"
+            
+        except requests.exceptions.RequestException as e:
+            print(f"\n[NETWORK ERROR] Could not reach local AI: {str(e)}")
+            yield json.dumps({"type": "error", "content": "Backend failed to reach local AI."}) + "\n"
+        except Exception as e:
+            print("\n[CRITICAL ERROR] Python script crash!")
+            traceback.print_exc()
+            yield json.dumps({"type": "error", "content": f"Python crash: {str(e)}"}) + "\n"
+
+    # Send the generator as a live NDJSON stream to bypass Cloudflare limits
+    return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
 
 if __name__ == '__main__':
     init_db()
