@@ -7,6 +7,7 @@ import uuid
 import traceback
 import json
 from duckduckgo_search import DDGS
+from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -87,8 +88,8 @@ def fetch_internet_context(prompt, model_name):
             if ai_decision.upper() != "NO" and len(ai_decision) > 1:
                 print(f"[*] Aurora requested web search for: '{ai_decision}'")
                 
-                # Generate the clock ONLY when searching
-                current_time = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d, %Y")
+                # Generate the clock ONLY when searching, forced to Vancouver time
+                current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
                 context = f"[System Note: The exact local server time is {current_time}]\n"
                 context += "Here is real-time information from the internet:\n"
                 
