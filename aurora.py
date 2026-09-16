@@ -322,8 +322,6 @@ def generate():
     conn.close()
 
     # Inject System Clock & Memory at the very beginning
-    from zoneinfo import ZoneInfo
-    import datetime
     current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
     
     system_content = f"The exact local time is {current_time}. You must always use this exact time and date. Never use UTC or military time."
