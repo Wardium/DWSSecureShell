@@ -276,114 +276,320 @@ def delete_chat(chat_id):
 @app.route('/api/generate', methods=['POST'])
 def generate():
     print("\n--- INCOMING API REQUEST (STREAMING) ---")
-    
+
     user_id = get_current_user()
-    data = request.json
+    data = request.get_json(silent=True) or {}
+
     chat_id = data.get('chat_id')
     model_choice = data.get('model', 'DWS:Aurora')
-    message = data.get('message')
-    
-    if not message:
-        return jsonify({"error": "Message content is required"}), 400
-        
-    actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
-    print(f"User: {user_id} | Targeting Local Model: {actual_model}")
+    message = data.get('message', '').strip()
 
-    # 1. DB Operations (Closed before streaming to prevent locks)
+    # Accept either a single image or an array of images
+    image = data.get('image')
+    images = data.get('images', [])
+
+    if image and not images:
+        images = [image]
+
+    if not message and not images:
+        return jsonify({"error": "Message content or attachment is required"}), 400
+
+    # Make sure images is actually a list
+    if not isinstance(images, list):
+        return jsonify({"error": "images must be an array"}), 400
+
+    actual_model = MODEL_MAP.get(model_choice, "DWS:Aurora")
+
+    print(
+        f"User: {user_id} | "
+        f"Targeting Local Model: {actual_model} | "
+        f"Images: {len(images)}"
+    )
+
+    # ---------------------------------------------------------
+    # 1. DATABASE OPERATIONS
+    # ---------------------------------------------------------
+
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
+
     if not chat_id:
         chat_id = str(uuid.uuid4())
-        title = message[:30] + "..." if len(message) > 30 else message
-        c.execute("INSERT INTO chats (id, user_id, title, created_at, starred) VALUES (?, ?, ?, ?, 0)",
-                  (chat_id, user_id, title, datetime.datetime.now()))
-    
-    c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-              (chat_id, "user", message, datetime.datetime.now()))
+
+        title_source = message if message else "Image"
+        title = (
+            title_source[:30] + "..."
+            if len(title_source) > 30
+            else title_source
+        )
+
+        c.execute(
+            """
+            INSERT INTO chats
+            (id, user_id, title, created_at, starred)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (
+                chat_id,
+                user_id,
+                title,
+                datetime.datetime.now()
+            )
+        )
+
+    # Save the text message normally
+    c.execute(
+        """
+        INSERT INTO messages
+        (chat_id, role, content, timestamp)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            chat_id,
+            "user",
+            message,
+            datetime.datetime.now()
+        )
+    )
+
     conn.commit()
 
-    # ---> NEW: MEMORY COMPACTION & HISTORY PULL <---
-    # Run compaction on old messages
+    # ---------------------------------------------------------
+    # 2. MEMORY COMPACTION
+    # ---------------------------------------------------------
+
     compact_chat_memory(chat_id)
 
-    # Fetch the active summary (if one exists)
-    c.execute("SELECT summary FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    # Fetch active summary
+    c.execute(
+        "SELECT summary FROM chat_summaries WHERE chat_id = ?",
+        (chat_id,)
+    )
+
     summary_row = c.fetchone()
     active_summary = summary_row[0] if summary_row else None
 
-    # Fetch ONLY the most recent 6 messages for context
-    c.execute("""
-        SELECT role, content FROM (
-            SELECT id, role, content FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 6
-        ) ORDER BY id ASC
-    """, (chat_id,))
-    history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
+    # Fetch recent messages
+    c.execute(
+        """
+        SELECT role, content
+        FROM (
+            SELECT id, role, content
+            FROM messages
+            WHERE chat_id = ?
+            ORDER BY id DESC
+            LIMIT 6
+        )
+        ORDER BY id ASC
+        """,
+        (chat_id,)
+    )
+
+    history = [
+        {
+            "role": row[0],
+            "content": row[1]
+        }
+        for row in c.fetchall()
+    ]
+
     conn.close()
 
-    # Inject System Clock & Memory at the very beginning
-    current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
-    
-    system_content = f"The exact local time is {current_time}. You must always use this exact time and date. Never use UTC or military time."
-    if active_summary:
-        system_content += f"\n\n[Memory of earlier conversation: {active_summary}]"
-        
-    history.insert(0, {"role": "system", "content": system_content})
-    # -----------------------------------------------
+    # ---------------------------------------------------------
+    # 3. SYSTEM MESSAGE
+    # ---------------------------------------------------------
 
-    # Check if a web search is needed
+    current_time = datetime.datetime.now(
+        ZoneInfo('America/Vancouver')
+    ).strftime("%I:%M %p on %A, %B %d, %Y")
+
+    system_content = (
+        f"The exact local time is {current_time}. "
+        f"You must always use this exact time and date. "
+        f"Never use UTC or military time."
+    )
+
+    if active_summary:
+        system_content += (
+            f"\n\n[Memory of earlier conversation: {active_summary}]"
+        )
+
+    history.insert(
+        0,
+        {
+            "role": "system",
+            "content": system_content
+        }
+    )
+
+    # ---------------------------------------------------------
+    # 4. ADD IMAGE(S) TO THE CURRENT USER MESSAGE
+    # ---------------------------------------------------------
+
+    # The latest message is the user's message because we just
+    # inserted the system message at index 0.
+    if history:
+        latest_user_message = history[-1]
+
+        if latest_user_message["role"] == "user" and images:
+            latest_user_message["images"] = images
+
+    # ---------------------------------------------------------
+    # 5. WEB SEARCH
+    # ---------------------------------------------------------
+
     web_context = fetch_internet_context(message, actual_model)
+
     if web_context:
-        history[-1]['content'] = f"{web_context}User's Prompt: {message}"
+        latest_user_message = history[-1]
+
+        existing_content = latest_user_message.get("content", "")
+
+        latest_user_message["content"] = (
+            f"{web_context}\n\n"
+            f"User's Prompt: {existing_content}"
+        )
+
+        # IMPORTANT:
+        # Don't overwrite the whole message object here,
+        # because that would delete the "images" field.
+
+    # ---------------------------------------------------------
+    # 6. OLLAMA PAYLOAD
+    # ---------------------------------------------------------
 
     payload = {
         "model": actual_model,
         "messages": history,
-        "stream": True 
+        "stream": True
     }
-    
-    # 2. Setup the stream generator
+
+    print("Sending payload to Ollama...")
+    print(f"Message count: {len(history)}")
+    print(f"Image count: {len(images)}")
+
+    # ---------------------------------------------------------
+    # 7. STREAM GENERATOR
+    # ---------------------------------------------------------
+
     def generate_stream():
         try:
-            yield json.dumps({"type": "start", "chat_id": chat_id}) + "\n"
-            
+            yield json.dumps({
+                "type": "start",
+                "chat_id": chat_id
+            }) + "\n"
+
             full_ai_message = ""
-            print(f"Attempting to contact local AI at: {OLLAMA_URL}...")
-            
-            with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=500) as response:
+
+            print(
+                f"Attempting to contact local AI at: "
+                f"{OLLAMA_URL}..."
+            )
+
+            with requests.post(
+                OLLAMA_URL,
+                json=payload,
+                stream=True,
+                timeout=500
+            ) as response:
+
                 if response.status_code != 200:
-                    yield json.dumps({"type": "error", "content": f"AI Server rejected request. Status: {response.status_code}"}) + "\n"
+                    error_text = response.text
+
+                    print(
+                        f"Ollama returned {response.status_code}: "
+                        f"{error_text}"
+                    )
+
+                    yield json.dumps({
+                        "type": "error",
+                        "content": (
+                            f"AI Server rejected request. "
+                            f"Status: {response.status_code}"
+                        )
+                    }) + "\n"
+
                     return
-                
-                # Stream the words directly to the browser
+
                 for line in response.iter_lines():
-                    if line:
+                    if not line:
+                        continue
+
+                    try:
                         chunk = json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        full_ai_message += content
-                        yield json.dumps({"type": "chunk", "content": content}) + "\n"
-            
-            # 3. Save the final message to the database
+                    except json.JSONDecodeError:
+                        continue
+
+                    content = chunk.get(
+                        "message", {}
+                    ).get("content", "")
+
+                    full_ai_message += content
+
+                    yield json.dumps({
+                        "type": "chunk",
+                        "content": content
+                    }) + "\n"
+
+            # -------------------------------------------------
+            # 8. SAVE AI RESPONSE
+            # -------------------------------------------------
+
             save_conn = sqlite3.connect(DB_NAME)
             save_c = save_conn.cursor()
-            save_c.execute("INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                      (chat_id, "assistant", full_ai_message, datetime.datetime.now()))
+
+            save_c.execute(
+                """
+                INSERT INTO messages
+                (chat_id, role, content, timestamp)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    "assistant",
+                    full_ai_message,
+                    datetime.datetime.now()
+                )
+            )
+
             save_conn.commit()
             save_conn.close()
-            
-            print("Successfully finished streaming response.")
-            yield json.dumps({"type": "done"}) + "\n"
-            
-        except requests.exceptions.RequestException as e:
-            print(f"\n[NETWORK ERROR] Could not reach local AI: {str(e)}")
-            yield json.dumps({"type": "error", "content": "Backend failed to reach local AI."}) + "\n"
-        except Exception as e:
-            print("\n[CRITICAL ERROR] Python script crash!")
-            traceback.print_exc()
-            yield json.dumps({"type": "error", "content": f"Python crash: {str(e)}"}) + "\n"
 
-    # Send the generator as a live NDJSON stream to bypass Cloudflare limits
-    return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
+            print(
+                "Successfully finished streaming response."
+            )
+
+            yield json.dumps({
+                "type": "done"
+            }) + "\n"
+
+        except requests.exceptions.RequestException as e:
+            print(
+                f"\n[NETWORK ERROR] "
+                f"Could not reach local AI: {str(e)}"
+            )
+
+            yield json.dumps({
+                "type": "error",
+                "content": "Backend failed to reach local AI."
+            }) + "\n"
+
+        except Exception as e:
+            print(
+                "\n[CRITICAL ERROR] Python script crash!"
+            )
+
+            traceback.print_exc()
+
+            yield json.dumps({
+                "type": "error",
+                "content": f"Python crash: {str(e)}"
+            }) + "\n"
+
+    return Response(
+        stream_with_context(generate_stream()),
+        mimetype='application/x-ndjson'
+    )
 
 if __name__ == '__main__':
     init_db()
