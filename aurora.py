@@ -78,7 +78,8 @@ def fetch_internet_context(prompt, model_name):
                     "output ONLY the best short search query. "
                     "ONLY output exactly the word 'NO' if the user's prompt is purely imaginative (creative writing), "
                     "strictly code generation, or a casual personal greeting."
-                    "If asked what time it is, please provide time. ANYTHING that NEEDS REAL WORLD INFORMATION"
+                    "If asked what time it is, please provide time, date, facts, info, ANYTHING. ANYTHING that NEEDS REAL WORLD INFORMATION"
+                    "DO NOT UNDER ANY CIRCUMSTANCE rely on internal information, look up everything."
                 )
             },
             {"role": "user", "content": prompt}
