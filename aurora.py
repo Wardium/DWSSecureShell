@@ -64,9 +64,8 @@ def get_current_user():
 def fetch_internet_context(prompt, model_name):
     """
     Asks the AI if it needs to search the web. If yes, runs a free DuckDuckGo search 
-    and returns the live data. If no, returns an empty string.
+    and returns the live data ALONG WITH the system clock. If no, returns an empty string.
     """
-    # 1. Ask the AI if it needs the internet
     check_payload = {
         "model": model_name,
         "messages": [
@@ -80,28 +79,33 @@ def fetch_internet_context(prompt, model_name):
     }
     
     try:
-        # Use a short timeout so we don't hold up the chat
         res = requests.post(OLLAMA_URL, json=check_payload, timeout=20)
         if res.status_code == 200:
             ai_decision = res.json().get('message', {}).get('content', '').strip()
             
-            # 2. If the AI didn't say "NO", run the search!
+            # If the AI decides to search, we grab the time and the web data!
             if ai_decision.upper() != "NO" and len(ai_decision) > 1:
                 print(f"[*] Aurora requested web search for: '{ai_decision}'")
                 
+                # Generate the clock ONLY when searching
+                current_time = datetime.datetime.now().strftime("%I:%M %p on %A, %B %d, %Y")
+                context = f"[System Note: The exact local server time is {current_time}]\n"
+                context += "Here is real-time information from the internet:\n"
+                
                 try:
+                    from duckduckgo_search import DDGS
                     with DDGS() as ddgs:
-                        # Grab the top 3 text results from DuckDuckGo
                         results = list(ddgs.text(ai_decision, max_results=3))
                         
                     if results:
-                        context = "Here is real-time information from the internet to help you answer the user:\n"
                         for r in results:
                             context += f"- {r.get('title')}: {r.get('body')}\n"
-                        return context + "\n\n"
+                        return context + "\n"
+                    else:
+                        return context + "- No internet results found.\n\n"
                 except Exception as e:
                     print(f"[*] DuckDuckGo search failed: {e}")
-                    return ""
+                    return context + "\n"
     except Exception as e:
         print(f"[*] Search decision failed: {e}")
         
@@ -224,11 +228,8 @@ def generate():
     conn.close()
 
     # ---> NEW: SMART INTERNET SEARCH <---
-    # We check if a web search is needed based ONLY on the newest user message
     web_context = fetch_internet_context(message, actual_model)
     if web_context:
-        # Sneak the live web data into the last message so the AI can read it,
-        # but the user won't actually see the injection in their chat history!
         history[-1]['content'] = f"{web_context}User's Prompt: {message}"
     # ------------------------------------
 
