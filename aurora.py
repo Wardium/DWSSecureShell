@@ -6,6 +6,7 @@ import datetime
 import uuid
 import traceback
 import json
+from duckduckgo_search import DDGS
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -59,6 +60,52 @@ def get_current_user():
         
     # 3. Fallback to web cookie
     return request.cookies.get('aurora_user_id', 'anonymous')
+
+def fetch_internet_context(prompt, model_name):
+    """
+    Asks the AI if it needs to search the web. If yes, runs a free DuckDuckGo search 
+    and returns the live data. If no, returns an empty string.
+    """
+    # 1. Ask the AI if it needs the internet
+    check_payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system", 
+                "content": "You are a web-search decision engine. If the user's prompt requires recent facts, news, live data, or things outside your training data, output ONLY the best short search query. If it does NOT require a search (e.g., coding help, local files, general conversation), output exactly the word 'NO'."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        "stream": False
+    }
+    
+    try:
+        # Use a short timeout so we don't hold up the chat
+        res = requests.post(OLLAMA_URL, json=check_payload, timeout=20)
+        if res.status_code == 200:
+            ai_decision = res.json().get('message', {}).get('content', '').strip()
+            
+            # 2. If the AI didn't say "NO", run the search!
+            if ai_decision.upper() != "NO" and len(ai_decision) > 1:
+                print(f"[*] Aurora requested web search for: '{ai_decision}'")
+                
+                try:
+                    with DDGS() as ddgs:
+                        # Grab the top 3 text results from DuckDuckGo
+                        results = list(ddgs.text(ai_decision, max_results=3))
+                        
+                    if results:
+                        context = "Here is real-time information from the internet to help you answer the user:\n"
+                        for r in results:
+                            context += f"- {r.get('title')}: {r.get('body')}\n"
+                        return context + "\n\n"
+                except Exception as e:
+                    print(f"[*] DuckDuckGo search failed: {e}")
+                    return ""
+    except Exception as e:
+        print(f"[*] Search decision failed: {e}")
+        
+    return ""
 
 @app.route('/')
 def index():
@@ -176,10 +223,19 @@ def generate():
     history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
     conn.close()
 
+    # ---> NEW: SMART INTERNET SEARCH <---
+    # We check if a web search is needed based ONLY on the newest user message
+    web_context = fetch_internet_context(message, actual_model)
+    if web_context:
+        # Sneak the live web data into the last message so the AI can read it,
+        # but the user won't actually see the injection in their chat history!
+        history[-1]['content'] = f"{web_context}User's Prompt: {message}"
+    # ------------------------------------
+
     payload = {
         "model": actual_model,
         "messages": history,
-        "stream": True # <--- ENABLE OLLAMA STREAMING
+        "stream": True 
     }
     
     # 2. Setup the stream generator
