@@ -32,6 +32,9 @@ def init_db():
                  (id TEXT PRIMARY KEY, user_id TEXT, title TEXT, created_at DATETIME, starred INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS messages
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, content TEXT, timestamp DATETIME)''')
+    # ---> NEW: Memory Compaction Table <---
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_summaries
+                 (chat_id TEXT PRIMARY KEY, summary TEXT, last_summarized_id INTEGER)''')
     conn.commit()
     conn.close()
 
@@ -46,6 +49,72 @@ def cleanup_old_history():
     c.execute("DELETE FROM chats WHERE created_at < ? AND starred = 0", (seven_days_ago,))
     conn.commit()
     conn.close()
+
+def compact_chat_memory(chat_id):
+    """
+    Uses DWS:Swift to fold older messages into a running summary.
+    Leaves the most recent 6 messages verbatim.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # 1. Fetch all messages in order
+    c.execute("SELECT id, role, content FROM messages WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
+    all_msgs = c.fetchall()
+    
+    KEEP_RECENT = 6
+    if len(all_msgs) <= KEEP_RECENT:
+        conn.close()
+        return
+
+    msgs_to_summarize = all_msgs[:-KEEP_RECENT]
+    
+    # 2. Check what has already been summarized
+    c.execute("SELECT summary, last_summarized_id FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    row = c.fetchone()
+    current_summary = row[0] if row else ""
+    last_id = row[1] if row else 0
+    
+    new_to_summarize = [m for m in msgs_to_summarize if m[0] > last_id]
+    if not new_to_summarize:
+        conn.close()
+        return
+
+    # 3. Format the chunk for DWS:Swift
+    convo_chunk = "\n".join([f"{role.capitalize()}: {content}" for _, role, content in new_to_summarize])
+    
+    prompt = (
+        "You are a memory condenser. Update the existing memory with the new conversation below. "
+        "Output ONLY a dense 2-3 sentence summary retaining key facts, user preferences, and decisions.\n\n"
+    )
+    if current_summary:
+        prompt += f"Existing Memory:\n{current_summary}\n\n"
+    prompt += f"New Conversation:\n{convo_chunk}"
+
+    try:
+        res = requests.post(OLLAMA_URL, json={
+            "model": MODEL_MAP.get("DWS:Swift", "DWS:Swift"),
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }, timeout=15)
+        
+        if res.status_code == 200:
+            updated_summary = res.json().get('message', {}).get('content', '').strip()
+            newest_id = new_to_summarize[-1][0]
+            
+            c.execute("""
+                INSERT INTO chat_summaries (chat_id, summary, last_summarized_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    summary = excluded.summary,
+                    last_summarized_id = excluded.last_summarized_id
+            """, (chat_id, updated_summary, newest_id))
+            conn.commit()
+            print(f"[*] Memory compacted for chat {chat_id}")
+    except Exception as e:
+        print(f"[*] Memory compaction failed: {e}")
+    finally:
+        conn.close()
 
 # --- API HELPER FUNCTION ---
 def get_current_user():
@@ -234,9 +303,35 @@ def generate():
               (chat_id, "user", message, datetime.datetime.now()))
     conn.commit()
 
-    c.execute("SELECT role, content FROM messages WHERE chat_id = ? ORDER BY timestamp ASC", (chat_id,))
+    # ---> NEW: MEMORY COMPACTION & HISTORY PULL <---
+    # Run compaction on old messages
+    compact_chat_memory(chat_id)
+
+    # Fetch the active summary (if one exists)
+    c.execute("SELECT summary FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    summary_row = c.fetchone()
+    active_summary = summary_row[0] if summary_row else None
+
+    # Fetch ONLY the most recent 6 messages for context
+    c.execute("""
+        SELECT role, content FROM (
+            SELECT id, role, content FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 6
+        ) ORDER BY id ASC
+    """, (chat_id,))
     history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
     conn.close()
+
+    # Inject System Clock & Memory at the very beginning
+    from zoneinfo import ZoneInfo
+    import datetime
+    current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
+    
+    system_content = f"The exact local time is {current_time}. You must always use this exact time and date. Never use UTC or military time."
+    if active_summary:
+        system_content += f"\n\n[Memory of earlier conversation: {active_summary}]"
+        
+    history.insert(0, {"role": "system", "content": system_content})
+    # -----------------------------------------------
 
     # Check if a web search is needed
     web_context = fetch_internet_context(message, actual_model)
