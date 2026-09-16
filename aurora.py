@@ -64,15 +64,21 @@ def get_current_user():
 
 def fetch_internet_context(prompt, model_name):
     """
-    Asks the AI if it needs to search the web. If yes, runs a free DuckDuckGo search 
-    and returns the live data ALONG WITH the system clock. If no, returns an empty string.
+    Aggressive search engine that looks up almost everything.
     """
     check_payload = {
         "model": model_name,
         "messages": [
             {
                 "role": "system", 
-                "content": "You are a web-search decision engine. If the user's prompt requires recent facts, news, live data, or things outside your training data, output ONLY the best short search query. If it does NOT require a search (e.g., coding help, local files, general conversation), output exactly the word 'NO'."
+                "content": (
+                    "You are an aggressive web-search decision engine. You must trigger a search for ANY factual, "
+                    "real-world, informational, non-inventive, or non-imaginative question. "
+                    "If the user asks for the time, dates, definitions, facts, news, specs, or general knowledge, "
+                    "output ONLY the best short search query. "
+                    "ONLY output exactly the word 'NO' if the user's prompt is purely imaginative (creative writing), "
+                    "strictly code generation, or a casual personal greeting."
+                )
             },
             {"role": "user", "content": prompt}
         ],
@@ -84,18 +90,20 @@ def fetch_internet_context(prompt, model_name):
         if res.status_code == 200:
             ai_decision = res.json().get('message', {}).get('content', '').strip()
             
-            # If the AI decides to search, we grab the time and the web data!
+            # If the AI decides to search (meaning it didn't output 'NO')
             if ai_decision.upper() != "NO" and len(ai_decision) > 1:
                 print(f"[*] Aurora requested web search for: '{ai_decision}'")
                 
-                # Generate the clock ONLY when searching, forced to Vancouver time
+                # ---> INJECT THE PACIFIC TIME CLOCK HERE <---
+                from zoneinfo import ZoneInfo
                 current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
-                context = f"[System Note: The exact local server time is {current_time}]\n"
+                context = f"[System Note: Your internal clock is {current_time}. Always use 12-hour AM/PM format.]\n\n"
                 context += "Here is real-time information from the internet:\n"
                 
                 try:
                     from duckduckgo_search import DDGS
                     with DDGS() as ddgs:
+                        # You can increase max_results=5 or 10 since you have no token limits!
                         results = list(ddgs.text(ai_decision, max_results=3))
                         
                     if results:
@@ -228,11 +236,10 @@ def generate():
     history = [{"role": row[0], "content": row[1]} for row in c.fetchall()]
     conn.close()
 
-    # ---> NEW: SMART INTERNET SEARCH <---
+    # Check if a web search is needed
     web_context = fetch_internet_context(message, actual_model)
     if web_context:
         history[-1]['content'] = f"{web_context}User's Prompt: {message}"
-    # ------------------------------------
 
     payload = {
         "model": actual_model,
