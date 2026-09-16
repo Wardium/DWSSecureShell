@@ -730,50 +730,95 @@
                 botMsgWrapper.classList.add('pop-in');
                 chatArea.scrollTop = chatArea.scrollHeight;
             };
+
+            return targetBubble; // <--- ADD THIS LINE
+            
         }
 
         async function executeApiCall(message) {
-            const payload = { chat_id: currentChatId, model: selectedModel, message: message };
+        const payload = { chat_id: currentChatId, model: selectedModel, message: message };
 
-            if (attachedImageBase64) {
-                payload.images = [attachedImageBase64];
-                attachedImageBase64 = null;
-                document.getElementById('attach-btn').classList.remove('active');
-                document.getElementById('file-input').value = ""; 
-            }
-
-            const chatArea = document.getElementById('chat-area');
-            const header = document.getElementById('main-header');
-            
-            // Start the header shaking while we wait
-            header.classList.add('shaking');
-
-            try {
-                const res = await fetch(API_BASE + '/api/generate', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload)
-                });
-                
-                const rawText = await res.text();
-                let data;
-                try { data = JSON.parse(rawText); } catch (e) { throw new Error("Server error"); }
-                
-                if(data.chat_id) currentChatId = data.chat_id;
-                
-                // Stop shaking once data returns
-                header.classList.remove('shaking');
-
-                if (res.ok && data.response) {
-                    triggerReceive(data.response);
-                } else {
-                    triggerReceive("Error: " + (data.error || "Unknown error."));
-                }
-            } catch (err) {
-                header.classList.remove('shaking');
-                triggerReceive("Network error connecting to the backend.");
-            }
+        if (attachedImageBase64) {
+            payload.images = [attachedImageBase64];
+            attachedImageBase64 = null;
+            document.getElementById('attach-btn').classList.remove('active');
+            document.getElementById('file-input').value = ""; 
         }
+
+        const chatArea = document.getElementById('chat-area');
+        const header = document.getElementById('main-header');
+        
+        header.classList.add('shaking');
+
+        try {
+            const res = await fetch(API_BASE + '/api/generate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            
+            if (!res.ok) {
+                const errText = await res.text();
+                header.classList.remove('shaking');
+                const bubble = triggerReceive();
+                bubble.innerText = "Error: " + errText;
+                return;
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let done = false;
+            
+            let botBubble = null;
+            let isFirstChunk = true;
+
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                done = readerDone;
+
+                if (value) {
+                    const chunkStr = decoder.decode(value, {stream: true});
+                    const lines = chunkStr.split('\n');
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const data = JSON.parse(line);
+
+                            if (data.type === 'start') {
+                                if (data.chat_id) currentChatId = data.chat_id;
+                            } 
+                            else if (data.type === 'chunk') {
+                                if (isFirstChunk) {
+                                    header.classList.remove('shaking');
+                                    botBubble = triggerReceive(); // Fires the plane animation
+                                    isFirstChunk = false;
+                                }
+                                if (botBubble) {
+                                    botBubble.innerText += data.content;
+                                    chatArea.scrollTop = chatArea.scrollHeight;
+                                }
+                            } 
+                            else if (data.type === 'error') {
+                                if (isFirstChunk) {
+                                    header.classList.remove('shaking');
+                                    botBubble = triggerReceive();
+                                    isFirstChunk = false;
+                                }
+                                if (botBubble) botBubble.innerText += "\n\n[Error]: " + data.content;
+                            }
+                        } catch (parseErr) {
+                            console.error("Stream parse error:", parseErr);
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            header.classList.remove('shaking');
+            const bubble = triggerReceive();
+            bubble.innerText = "Network error connecting to the backend.";
+        }
+    }
     </script>
 </body>
 </html>
