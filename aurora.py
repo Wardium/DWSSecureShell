@@ -438,7 +438,7 @@ def generate():
     # 5. WEB SEARCH
     # ---------------------------------------------------------
 
-    web_context = fetch_internet_context(message, actual_model)
+    web_context = fetch_internet_context(message, DWS:Swift)
 
     if web_context:
         latest_user_message = history[-1]
