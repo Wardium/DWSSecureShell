@@ -795,7 +795,7 @@
                                     isFirstChunk = false;
                                 }
                                 if (botBubble) {
-                                    botBubble.innerText += data.content;
+                                    botBubble.innerText += data.content.replace(/\*/g, '');
                                     chatArea.scrollTop = chatArea.scrollHeight;
                                 }
                             } 
