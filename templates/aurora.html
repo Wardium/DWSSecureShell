@@ -636,7 +636,7 @@
         }
 
         // --- Physics-Based Paper Plane Animation (Receiving) ---
-        function triggerReceive(botMessageText) {
+        function triggerReceive(botMessageText = '') {
             const chatArea = document.getElementById('chat-area');
             const botMsgWrapper = appendMessage('bot', botMessageText);
             
