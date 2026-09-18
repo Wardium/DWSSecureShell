@@ -233,8 +233,18 @@
         .action-btn:hover { transform: scale(1.2); }
 
         .svg-icon { width: 1.2em; height: 1.2em; fill: currentColor; vertical-align: middle; }
-        
+
+        .katex { font-size: 1.1em; }
+
     </style>
+
+    <!-- KaTeX CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <!-- KaTeX JS -->
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <!-- KaTeX Auto-render Extension -->
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js" onload="window.katexReady = true;"></script>
+    
 </head>
 <body>
 
@@ -527,13 +537,29 @@
             const bubble = document.createElement('div');
             bubble.className = `message-bubble glass float-hover`;
             bubble.style.animationDelay = `-${Math.random() * 2}s`;
-            bubble.innerText = content;
+            
+            // Use innerHTML instead of innerText to support formatted text/math parsing
+            bubble.innerHTML = content;
 
             wrapper.appendChild(bubble);
             chatArea.appendChild(wrapper);
             return wrapper;
         }
 
+        function renderMathInElement(element) {
+            if (window.renderMathInElement && window.katexReady) {
+                window.renderMathInElement(element, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '\\(', right: '\\)', display: false},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\[', right: '\\]', display: true}
+                    ],
+                    throwOnError: false
+                });
+            }
+        }
+        
         // --- Sophisticated Physics-Based Paper Plane Animation (Sending) ---
         function triggerSend() {
             const input = document.getElementById('prompt-input');
