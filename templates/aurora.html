@@ -822,10 +822,16 @@
                                     isFirstChunk = false;
                                 }
                                 if (botBubble) {
-                                    botBubble.innerText += data.content.replace(/\*/g, '');
+                                    // Accumulate raw text and filter asterisks if desired
+                                    botBubble.rawText = (botBubble.rawText || '') + data.content.replace(/\*/g, '');
+                                    
+                                    // Set HTML and render KaTeX
+                                    botBubble.innerHTML = botBubble.rawText;
+                                    renderMathInElement(botBubble);
+                                    
                                     chatArea.scrollTop = chatArea.scrollHeight;
                                 }
-                            } 
+                            }
                             else if (data.type === 'error') {
                                 if (isFirstChunk) {
                                     header.classList.remove('shaking');
