@@ -100,22 +100,24 @@ def handle_disconnect():
 # MODULE 4: Local Port Forwarding Proxy
 # ==========================================
 from flask import Response
+import urllib3
 
-@app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-@app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-def local_port_proxy(target_port, subpath=""):
-    # Route traffic to localhost on the requested port
-    target_url = f"http://127.0.0.1:{target_port}/{subpath}"
+# Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def perform_proxy(scheme, target_host, target_port, subpath):
+    # Route traffic to the requested target
+    target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
     
     # Forward query parameters if they exist
     if request.query_string:
         target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
         
     try:
-        # Strip the original Host header so the request appears local to the target app
+        # Strip the original Host header so the request appears native to the target app
         req_headers = {key: value for key, value in request.headers if key.lower() != 'host'}
         
-        # Forward the request to the local service (added a 15-second timeout to prevent hanging)
+        # Forward the request (verify=False allows self-signed local certs for https)
         proxied_response = requests.request(
             method=request.method,
             url=target_url,
@@ -124,7 +126,8 @@ def local_port_proxy(target_port, subpath=""):
             cookies=request.cookies,
             allow_redirects=False,
             stream=True,
-            timeout=15
+            timeout=15,
+            verify=False 
         )
         
         # Exclude hop-by-hop headers that shouldn't be forwarded to the client
@@ -133,11 +136,29 @@ def local_port_proxy(target_port, subpath=""):
         
         for key, value in proxied_response.raw.headers.items():
             if key.lower() not in excluded_headers:
-                # Rewrite absolute redirects so you aren't forced back to a localhost URL
+                # Rewrite absolute redirects so you aren't forced back to the internal URL
                 if key.lower() == 'location':
-                    host_replacement = f"{request.scheme}://{request.host}/port/{target_port}"
-                    value = value.replace(f"http://127.0.0.1:{target_port}", host_replacement)
-                    value = value.replace(f"http://localhost:{target_port}", host_replacement)
+                    # Determine how the client got here so we rewrite the redirect appropriately
+                    if target_host == '127.0.0.1' and scheme == 'http':
+                        host_replacement = f"{request.scheme}://{request.host}/port/{target_port}"
+                    elif scheme == 'https':
+                        host_replacement = f"{request.scheme}://{request.host}/https/{target_host}:{target_port}"
+                    else:
+                        host_replacement = f"{request.scheme}://{request.host}/address/{target_host}:{target_port}"
+
+                    # Replace exact matches with port
+                    value = value.replace(f"{scheme}://{target_host}:{target_port}", host_replacement)
+                    
+                    # Replace matches without port if using default HTTP(S) ports
+                    if (scheme == 'http' and int(target_port) == 80) or (scheme == 'https' and int(target_port) == 443):
+                        value = value.replace(f"{scheme}://{target_host}", host_replacement)
+                        
+                    # Catch localhost edge cases for the legacy local port proxy
+                    if target_host == '127.0.0.1':
+                        value = value.replace(f"{scheme}://localhost:{target_port}", host_replacement)
+                        if int(target_port) == 80:
+                            value = value.replace(f"{scheme}://localhost", host_replacement)
+
                 resp_headers.append((key, value))
         
         # Stream the response back to the client
@@ -148,60 +169,21 @@ def local_port_proxy(target_port, subpath=""):
         )
 
     except requests.exceptions.ConnectionError:
-        logging.error(f"Proxy module: Connection Refused to port {target_port}")
-        # We use 503 here instead of 502 so Cloudflare doesn't intercept the page
+        logging.error(f"Proxy module: Connection Refused to {target_host}:{target_port}")
         return jsonify({
             "error": "Connection Refused", 
-            "details": f"Port {target_port} is either not running, or it is not listening on 127.0.0.1."
+            "details": f"The target {target_host}:{target_port} is either not running or inaccessible."
         }), 503
         
     except requests.exceptions.Timeout:
-        logging.error(f"Proxy module: Timeout connecting to port {target_port}")
-        return jsonify({"error": "Gateway Timeout", "details": f"Port {target_port} took too long to respond."}), 504
+        logging.error(f"Proxy module: Timeout connecting to {target_host}:{target_port}")
+        return jsonify({"error": "Gateway Timeout", "details": f"Target {target_host}:{target_port} took too long to respond."}), 504
         
     except Exception as e:
-        logging.error(f"Proxy module error connecting to local port {target_port}: {str(e)}")
+        logging.error(f"Proxy module error connecting to {target_host}:{target_port}: {str(e)}")
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
-# ==========================================
-# APP EXECUTION
-# ==========================================
-if __name__ == '__main__':
-    logging.info("Starting DWS Server Shell backend...")
-    
-    # --- MODULE 2: Start the Gatekeeper ---
-    # Determine the absolute path to gatekeeper.py to ensure it fires reliably
-    gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
-    
-    if os.path.exists(gatekeeper_script):
-        logging.info("Launching high-performance concurrent Gatekeeper process via Gunicorn...")
-        # Spawns Gunicorn with 4 asynchronous gevent workers handling port 5050
-        subprocess.Popen(
-            ["gunicorn", "-w", "4", "-k", "gevent", "-b", "0.0.0.0:5050", "gatekeeper:app"],
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            close_fds=True
-        )
-    else:
-        logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
-    # --------------------------------------
 
-    # --- MODULE 3: Start Aurora AI ---
-    # Determine the absolute path to aurora.py
-    aurora_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aurora.py')
-    
-    if os.path.exists(aurora_script):
-        logging.info("Launching Aurora AI module on port 5101...")
-        # Spawns Aurora using the current Python environment (sys.executable)
-        subprocess.Popen(
-            [sys.executable, "aurora.py"],
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            close_fds=True
-        )
-    else:
-        logging.error(f"aurora.py not found at {aurora_script}. Skipping Aurora launch.")
-    # --------------------------------------
-    
-    # Start the main SocketIO app (blocking call)
-    socketio.run(app, host='0.0.0.0', port=5000)
+# Original backwards-compatible loopback proxy
+@app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/port/<int:target_port>/<
