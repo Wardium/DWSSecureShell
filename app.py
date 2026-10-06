@@ -185,31 +185,32 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
 
 # Original backwards-compatible loopback proxy
-@app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-@app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-def local_port_proxy(target_port, subpath=""):
-    return perform_proxy('http', '127.0.0.1', target_port, subpath)
-
-# New HTTP address proxy
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
-    if ':' in host_port:
-        host, port_str = host_port.rsplit(':', 1)
-        port = int(port_str)
-    else:
-        host, port = host_port, 80
+    try:
+        if ':' in host_port:
+            host, port_str = host_port.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host, port = host_port, 80
+    except ValueError:
+        return jsonify({"error": "Invalid Port", "details": "The port must be a valid number."}), 400
+        
     return perform_proxy('http', host, port, subpath)
 
-# New HTTPS address proxy
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
-    if ':' in host_port:
-        host, port_str = host_port.rsplit(':', 1)
-        port = int(port_str)
-    else:
-        host, port = host_port, 443
+    try:
+        if ':' in host_port:
+            host, port_str = host_port.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host, port = host_port, 443
+    except ValueError:
+        return jsonify({"error": "Invalid Port", "details": "The port must be a valid number."}), 400
+        
     return perform_proxy('https', host, port, subpath)
 
 # ==========================================
