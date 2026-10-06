@@ -186,4 +186,71 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
 # Original backwards-compatible loopback proxy
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-@app.route('/port/<int:target_port>/<
+@app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def local_port_proxy(target_port, subpath=""):
+    return perform_proxy('http', '127.0.0.1', target_port, subpath)
+
+# New HTTP address proxy
+@app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def remote_http_proxy(host_port, subpath=""):
+    if ':' in host_port:
+        host, port_str = host_port.rsplit(':', 1)
+        port = int(port_str)
+    else:
+        host, port = host_port, 80
+    return perform_proxy('http', host, port, subpath)
+
+# New HTTPS address proxy
+@app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def remote_https_proxy(host_port, subpath=""):
+    if ':' in host_port:
+        host, port_str = host_port.rsplit(':', 1)
+        port = int(port_str)
+    else:
+        host, port = host_port, 443
+    return perform_proxy('https', host, port, subpath)
+
+# ==========================================
+# APP EXECUTION
+# ==========================================
+if __name__ == '__main__':
+    logging.info("Starting DWS Server Shell backend...")
+    
+    # --- MODULE 2: Start the Gatekeeper ---
+    # Determine the absolute path to gatekeeper.py to ensure it fires reliably
+    gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
+    
+    if os.path.exists(gatekeeper_script):
+        logging.info("Launching high-performance concurrent Gatekeeper process via Gunicorn...")
+        # Spawns Gunicorn with 4 asynchronous gevent workers handling port 5050
+        subprocess.Popen(
+            ["gunicorn", "-w", "4", "-k", "gevent", "-b", "0.0.0.0:5050", "gatekeeper:app"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            close_fds=True
+        )
+    else:
+        logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
+    # --------------------------------------
+
+    # --- MODULE 3: Start Aurora AI ---
+    # Determine the absolute path to aurora.py
+    aurora_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aurora.py')
+    
+    if os.path.exists(aurora_script):
+        logging.info("Launching Aurora AI module on port 5101...")
+        # Spawns Aurora using the current Python environment (sys.executable)
+        subprocess.Popen(
+            [sys.executable, "aurora.py"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            close_fds=True
+        )
+    else:
+        logging.error(f"aurora.py not found at {aurora_script}. Skipping Aurora launch.")
+    # --------------------------------------
+    
+    # Start the main SocketIO app (blocking call)
+    socketio.run(app, host='0.0.0.0', port=5000)
