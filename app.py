@@ -2,8 +2,9 @@
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response, redirect
 from flask_socketio import SocketIO
+from urllib.parse import urlparse
 import paramiko
 import logging
 import sys
@@ -11,6 +12,11 @@ import requests
 import time
 import subprocess
 import os
+import urllib3
+import re
+
+# Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(
     stream=sys.stdout, 
@@ -23,9 +29,7 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- GLOBAL VARIABLES ---
-# Dictionary to track active SSH sessions
 active_sessions = {}
-# Dictionary to track what state we are forcing devices into
 enforced_devices = {}
 
 # ==========================================
@@ -99,14 +103,6 @@ def handle_disconnect():
 # ==========================================
 # MODULE 4: Local Port Forwarding Proxy
 # ==========================================
-from flask import Response, redirect, request, jsonify
-from urllib.parse import urlparse
-import urllib3
-import re
-
-# Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 def perform_proxy(scheme, target_host, target_port, subpath):
     subpath = subpath.lstrip('/')
     target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
@@ -115,7 +111,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
         
     try:
-        # 1. COUNTERFEIT THE INBOUND HEADERS (Bypass CORS/CSRF protections)
+        # 1. COUNTERFEIT THE INBOUND HEADERS
         req_headers = {}
         for key, value in request.headers:
             k_lower = key.lower()
@@ -140,7 +136,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        # Strip security and length headers that prevent proxying and HTML injection
+        # Strip security and length headers
         excluded_headers = [
             'content-encoding', 'content-length', 'transfer-encoding', 'connection',
             'content-security-policy', 'content-security-policy-report-only',
@@ -155,7 +151,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         else:
             base_proxy_url = f"/address/{target_host}:{target_port}"
             
-        # 2. REWRITE OUTBOUND HEADERS (Fix Redirects and Cookies)
+        # 2. REWRITE OUTBOUND HEADERS
         for key, value in proxied_response.raw.headers.items():
             if key.lower() not in excluded_headers:
                 if key.lower() == 'location':
@@ -175,7 +171,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         cookie_val = f"{scheme}|{target_host}:{target_port}"
         resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
 
-        # 3. HTML AND JAVASCRIPT INJECTION (The SPA fix)
+        # 3. HTML AND JAVASCRIPT INJECTION
         content_type = proxied_response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
             try:
@@ -186,13 +182,12 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                 html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
                 html_content = html_content.replace('action="/', f'action="{base_proxy_url}/')
                 
-                # Advanced JS Interceptor for Fetch, XHR, and WebSockets
+                # Advanced JS Interceptor
                 js_interceptor = f"""
                 <script>
                 (function() {{
                     const proxyBase = "{base_proxy_url}";
                     
-                    // Hijack Fetch API
                     const origFetch = window.fetch;
                     window.fetch = function() {{
                         try {{
@@ -208,7 +203,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         return origFetch.apply(this, arguments);
                     }};
                     
-                    // Hijack XMLHttpRequest
                     const origOpen = XMLHttpRequest.prototype.open;
                     XMLHttpRequest.prototype.open = function() {{
                         try {{
@@ -224,7 +218,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         return origOpen.apply(this, arguments);
                     }};
                     
-                    // Hijack WebSockets
                     const origWS = window.WebSocket;
                     window.WebSocket = function(url, protocols) {{
                         try {{
@@ -241,7 +234,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                 </script>
                 """
                 
-                # Inject the script gracefully into the HTML
                 if '<head>' in html_content.lower():
                     idx = html_content.lower().find('<head>') + 6
                     html_content = html_content[:idx] + js_interceptor + html_content[idx:]
@@ -343,7 +335,34 @@ def catch_all(orphan_path):
                 proxy_target = f"http|127.0.0.1:{host_port}"
             else:
                 scheme = 'https' if proxy_type == 'https' else 'http'
-                proxy_target =
+                proxy_target = f"{scheme}|{host_port}"
+                
+    if not proxy_target:
+        proxy_target = request.cookies.get('dws_proxy_target')
+
+    if proxy_target:
+        try:
+            scheme, host_port = proxy_target.split('|', 1)
+            if ':' in host_port:
+                host, port_str = host_port.rsplit(':', 1)
+                port = int(port_str)
+            else:
+                host = host_port
+                port = 443 if scheme == 'https' else 80
+                
+            clean_path = orphan_path
+            if orphan_path.startswith('https/') or orphan_path.startswith('http/'):
+                clean_path = orphan_path.split('/', 1)[1]
+                
+            logging.info(f"Auto-routing API/Asset '/{clean_path}' to {host}:{port}")
+            return perform_proxy(scheme, host, port, clean_path)
+        except Exception as e:
+            logging.error(f"Auto-proxy failed for {orphan_path}: {str(e)}")
+            
+    return jsonify({
+        "error": "DWS Gateway: Orphaned Target", 
+        "details": f"The Catch-All router could not determine which app the path '/{orphan_path}' belongs to."
+    }), 404
 
 # ==========================================
 # APP EXECUTION
