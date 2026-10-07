@@ -207,6 +207,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
 
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/port/<int:target_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
@@ -214,7 +215,9 @@ def local_port_proxy(target_port, subpath=""):
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
+
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/address/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
@@ -231,7 +234,9 @@ def remote_http_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
 
+
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/https/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
