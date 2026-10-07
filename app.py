@@ -237,17 +237,15 @@ STREAM_HTML = """
     <title>DWS Remote Stream</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
-        body { margin: 0; background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; color: white;}
-        #stream-container { position: relative; max-width: 100%; max-height: 100%; box-shadow: 0 0 20px rgba(0,0,0,0.5);}
-        img { display: block; max-width: 100%; max-height: 100vh; cursor: crosshair; }
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; overflow: hidden; font-family: sans-serif; color: white; }
+        /* The image will now stretch to perfectly fill your window exactly as the host renders it */
+        img { width: 100vw; height: 100vh; object-fit: fill; cursor: crosshair; }
         #loading { position: absolute; font-size: 20px; text-shadow: 1px 1px 2px black; }
     </style>
 </head>
 <body>
-    <div id="stream-container">
-        <div id="loading">Booting Headless Host Browser...</div>
-        <img id="stream-display" src="" />
-    </div>
+    <div id="loading">Booting Headless Host Browser...</div>
+    <img id="stream-display" src="" />
 
     <script>
         const socket = io();
@@ -255,7 +253,12 @@ STREAM_HTML = """
         const loading = document.getElementById('loading');
 
         socket.on('connect', () => {
-            socket.emit('start_stream', { url: "{{ target_url }}" });
+            // Tell the backend exactly how big your window is so it scales 1:1 without borders
+            socket.emit('start_stream', { 
+                url: "{{ target_url }}",
+                width: window.innerWidth,
+                height: window.innerHeight
+            });
         });
 
         socket.on('stream_frame', function(data) {
@@ -264,16 +267,12 @@ STREAM_HTML = """
         });
 
         img.addEventListener('click', function(e) {
-            const rect = img.getBoundingClientRect();
-            const scaleX = img.naturalWidth / rect.width;
-            const scaleY = img.naturalHeight / rect.height;
-            const clickX = Math.round((e.clientX - rect.left) * scaleX);
-            const clickY = Math.round((e.clientY - rect.top) * scaleY);
-            socket.emit('stream_click', { x: clickX, y: clickY });
+            // Because the image is now exactly 1:1 with the headless browser, 
+            // we can send the exact raw mouse coordinates!
+            socket.emit('stream_click', { x: e.clientX, y: e.clientY });
         });
 
         window.addEventListener('keydown', function(e) {
-            // Prevent default scrolling for space/arrows
             if(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.code) > -1) {
                 e.preventDefault();
             }
@@ -284,7 +283,7 @@ STREAM_HTML = """
 </html>
 """
 
-@app.route('/stream/<proxy_type>/<target>')
+@app.route('/stream/<proxy_type>/<path:target>')
 def stream_route(proxy_type, target):
     if not SELENIUM_AVAILABLE:
         return "<h3>Selenium is missing!</h3><p>To use the Stream feature, please run <code>pip install selenium</code> on the host machine.</p>", 500
@@ -301,13 +300,16 @@ def handle_start_stream(data):
     if not SELENIUM_AVAILABLE: return
     
     url = data['url']
-    client_sid = request.sid
+    # Grab the user's exact screen dimensions (fallback to 1920x1080)
+    width = int(data.get('width', 1920))
+    height = int(data.get('height', 1080))
     
-    logging.info(f"Booting headless browser stream for {url}...")
+    client_sid = request.sid
+    logging.info(f"Booting {width}x{height} headless browser stream for {url}...")
     
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--window-size=1600,900")
+    chrome_options.add_argument(f"--window-size={width},{height}")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--ignore-certificate-errors")
@@ -321,12 +323,12 @@ def handle_start_stream(data):
         return
         
     def stream_loop():
-        # Continuously take screenshots and emit them to the browser
         while client_sid in stream_browsers:
             try:
                 img_b64 = stream_browsers[client_sid].get_screenshot_as_base64()
                 socketio.emit('stream_frame', {'image': img_b64}, to=client_sid)
-                eventlet.sleep(0.2) # ~5 Frames Per Second
+                # Reduced sleep time from 0.2 to 0.1 to double the framerate/responsiveness
+                eventlet.sleep(0.1) 
             except Exception as e:
                 break
     
@@ -339,8 +341,20 @@ def handle_stream_click(data):
         driver = stream_browsers[client_sid]
         x, y = data['x'], data['y']
         try:
-            # Inject javascript to click the exact coordinate inside the headless browser
-            script = f"document.elementFromPoint({x}, {y}).click();"
+            # Inject a true DOM MouseEvent to trick React/Vue into registering a real human click
+            script = f"""
+            var el = document.elementFromPoint({x}, {y});
+            if (el) {{
+                var ev = new MouseEvent('click', {{
+                    view: window,
+                    bubbles: true,
+                    cancelable: true,
+                    clientX: {x},
+                    clientY: {y}
+                }});
+                el.dispatchEvent(ev);
+            }}
+            """
             driver.execute_script(script)
         except:
             pass
@@ -352,7 +366,6 @@ def handle_stream_keypress(data):
         driver = stream_browsers[client_sid]
         key = data['key']
         try:
-            # Map special keys or inject standard characters into the active input
             active = driver.switch_to.active_element
             if key == 'Enter': active.send_keys('\ue007')
             elif key == 'Backspace': active.send_keys('\ue003')
