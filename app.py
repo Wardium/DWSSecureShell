@@ -2,7 +2,7 @@
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask, render_template, request, jsonify, Response, redirect
+from flask import Flask, render_template, render_template_string, request, jsonify, Response, redirect
 from flask_socketio import SocketIO
 from urllib.parse import urlparse
 import paramiko
@@ -14,9 +14,18 @@ import subprocess
 import os
 import urllib3
 import re
+import uuid
 
-# Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
+# Suppress insecure request warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Safely import Selenium for the new Stream feature
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
 logging.basicConfig(
     stream=sys.stdout, 
@@ -31,6 +40,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 # --- GLOBAL VARIABLES ---
 active_sessions = {}
 enforced_devices = {}
+stream_browsers = {}  # Tracks headless browsers for the Stream feature
 
 # ==========================================
 # MODULE 1: DWS Server Shell
@@ -57,17 +67,13 @@ def handle_ssh_connection(data):
     server = SERVERS[server_id]
     client_sid = request.sid  
     
-    logging.info(f"Attempting SSH connection to {server['host']}...")
-    
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
         ssh.connect(server['host'], username=server['user'], password=server['password'], timeout=5)
         channel = ssh.invoke_shell()
-        
         active_sessions[client_sid] = ssh
-        
         logging.info(f"SUCCESS: SSH session established for {server['host']}")
 
         def listen_to_ssh():
@@ -76,10 +82,8 @@ def handle_ssh_connection(data):
                     output = channel.recv(1024).decode('utf-8')
                     if output:
                         socketio.emit('ssh_output', {'output': output}, to=client_sid)
-                except Exception as e:
-                    logging.error(f"SSH listener error: {e}")
+                except:
                     break
-            logging.info(f"Stopped listening to SSH on {server['host']}")
 
         socketio.start_background_task(listen_to_ssh)
 
@@ -89,34 +93,35 @@ def handle_ssh_connection(data):
                 channel.send(input_data['input'])
 
     except Exception as e:
-        logging.error(f"FAILED: SSH connection failed. Reason: {str(e)}")
         socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=client_sid)
 
 @socketio.on('disconnect')
 def handle_disconnect():
     session_id = request.sid
     if session_id in active_sessions:
-        logging.info(f"Tab closed. Terminating SSH session for {session_id}")
         active_sessions[session_id].close()
         del active_sessions[session_id]
+        
+    # Cleanup orphaned streams
+    if session_id in stream_browsers:
+        try:
+            stream_browsers[session_id].quit()
+        except:
+            pass
+        del stream_browsers[session_id]
 
 # ==========================================
-# MODULE 4: Local Port Forwarding Proxy
+# MODULE 4: Simple Reverse Proxy (Reverted)
 # ==========================================
 def perform_proxy(scheme, target_host, target_port, subpath):
     subpath = subpath.lstrip('/')
-    
-    # Block Cloudflare analytics from spamming the target server with 405 errors
-    if subpath.startswith('cdn-cgi/'):
-        return Response(status=204)
-        
     target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
     
     if request.query_string:
         target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
         
     try:
-        # 1. COUNTERFEIT THE INBOUND HEADERS
+        # Spoof inbound headers so the target app accepts the request
         req_headers = {}
         for key, value in request.headers:
             k_lower = key.lower()
@@ -141,11 +146,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        excluded_headers = [
-            'content-encoding', 'content-length', 'transfer-encoding', 'connection',
-            'content-security-policy', 'content-security-policy-report-only',
-            'x-frame-options', 'strict-transport-security'
-        ]
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         resp_headers = []
         
         if target_host == '127.0.0.1' and scheme == 'http':
@@ -155,7 +156,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         else:
             base_proxy_url = f"/address/{target_host}:{target_port}"
             
-        # 2. REWRITE OUTBOUND HEADERS
+        # Rewrite Redirects and Cookies
         for key, value in proxied_response.raw.headers.items():
             if key.lower() not in excluded_headers:
                 if key.lower() == 'location':
@@ -171,107 +172,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
                 resp_headers.append((key, value))
         
-        cookie_val = f"{scheme}|{target_host}:{target_port}"
-        resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
-
-        # 3. HTML AND JAVASCRIPT INJECTION
-        content_type = proxied_response.headers.get('Content-Type', '').lower()
-        if 'text/html' in content_type:
-            try:
-                html_content = proxied_response.content.decode('utf-8', errors='ignore')
-                
-                html_content = html_content.replace('href="/', f'href="{base_proxy_url}/')
-                html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
-                html_content = html_content.replace('action="/', f'action="{base_proxy_url}/')
-                
-                # Advanced JS Interceptor with Flawless WebSocket Counterfeit
-                js_interceptor = f"""
-                <script>
-                (function() {{
-                    const proxyBase = "{base_proxy_url}";
-                    
-                    const origFetch = window.fetch;
-                    window.fetch = function() {{
-                        try {{
-                            if (typeof arguments[0] === 'string' && arguments[0].startsWith('/') && !arguments[0].startsWith(proxyBase)) {{
-                                arguments[0] = proxyBase + arguments[0];
-                            }} else if (arguments[0] instanceof Request) {{
-                                const url = new URL(arguments[0].url);
-                                if (url.origin === window.location.origin && !url.pathname.startsWith(proxyBase)) {{
-                                    arguments[0] = new Request(url.origin + proxyBase + url.pathname + url.search + url.hash, arguments[0]);
-                                }}
-                            }}
-                        }} catch(e) {{}}
-                        return origFetch.apply(this, arguments);
-                    }};
-                    
-                    const origOpen = XMLHttpRequest.prototype.open;
-                    XMLHttpRequest.prototype.open = function() {{
-                        try {{
-                            if (typeof arguments[1] === 'string' && arguments[1].startsWith('/') && !arguments[1].startsWith(proxyBase)) {{
-                                arguments[1] = proxyBase + arguments[1];
-                            }} else if (typeof arguments[1] === 'string') {{
-                                const url = new URL(arguments[1], window.location.origin);
-                                if (url.origin === window.location.origin && !url.pathname.startsWith(proxyBase)) {{
-                                    arguments[1] = url.origin + proxyBase + url.pathname + url.search + url.hash;
-                                }}
-                            }}
-                        }} catch(e) {{}}
-                        return origOpen.apply(this, arguments);
-                    }};
-                    
-                    // The Bulletproof WebSocket Mock
-                    const origWS = window.WebSocket;
-                    window.WebSocket = function(url, protocols) {{
-                        console.log("[DWS Gateway] Counterfeiting WebSocket for: " + url);
-                        
-                        const mock = Object.create(origWS.prototype);
-                        const target = document.createDocumentFragment();
-                        
-                        mock.url = url;
-                        mock.readyState = 1; // Start OPEN
-                        mock.bufferedAmount = 0;
-                        mock.extensions = "";
-                        mock.protocol = protocols ? (typeof protocols === 'string' ? protocols : protocols[0]) : "";
-                        mock.binaryType = "blob";
-                        
-                        mock.send = function() {{}};
-                        mock.close = function() {{ mock.readyState = 3; target.dispatchEvent(new Event('close')); }};
-                        mock.addEventListener = target.addEventListener.bind(target);
-                        mock.removeEventListener = target.removeEventListener.bind(target);
-                        mock.dispatchEvent = target.dispatchEvent.bind(target);
-                        
-                        ['onopen', 'onmessage', 'onerror', 'onclose'].forEach(name => {{
-                            Object.defineProperty(mock, name, {{
-                                set: function(cb) {{ target.addEventListener(name.substring(2), cb); }},
-                                get: function() {{ return null; }}
-                            }});
-                        }});
-                        
-                        setTimeout(() => {{
-                            const e = new Event('open');
-                            target.dispatchEvent(e);
-                            if(mock.onopen) mock.onopen(e);
-                        }}, 50);
-                        
-                        return mock;
-                    }};
-                    // Make absolutely sure it passes 'instanceof WebSocket'
-                    window.WebSocket.prototype = origWS.prototype;
-                }})();
-                </script>
-                """
-                
-                if '<head>' in html_content.lower():
-                    idx = html_content.lower().find('<head>') + 6
-                    html_content = html_content[:idx] + js_interceptor + html_content[idx:]
-                else:
-                    html_content = js_interceptor + html_content
-                
-                return Response(html_content, proxied_response.status_code, resp_headers)
-            except Exception as e:
-                logging.error(f"HTML Rewrite failed: {str(e)}")
-
         return Response(
             proxied_response.iter_content(chunk_size=10*1024), 
             proxied_response.status_code, 
@@ -295,6 +195,7 @@ def local_port_proxy(target_port, subpath=""):
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
+
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -302,16 +203,13 @@ def remote_http_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-        
     try:
-        if ':' in host_port:
-            host, port_str = host_port.rsplit(':', 1)
-            port = int(port_str)
-        else:
-            host, port = host_port, 80
+        host, port_str = host_port.rsplit(':', 1) if ':' in host_port else (host_port, 80)
+        port = int(port_str)
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
+
 
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -320,77 +218,148 @@ def remote_https_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-        
     try:
-        if ':' in host_port:
-            host, port_str = host_port.rsplit(':', 1)
-            port = int(port_str)
-        else:
-            host, port = host_port, 443
+        host, port_str = host_port.rsplit(':', 1) if ':' in host_port else (host_port, 443)
+        port = int(port_str)
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
 
-@app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-def root_bouncer():
-    proxy_target = request.cookies.get('dws_proxy_target')
-    if proxy_target:
-        try:
-            scheme, host_port = proxy_target.split('|', 1)
-            if scheme == 'http' and host_port.startswith('127.0.0.1:'):
-                port = host_port.split(':')[1]
-                return redirect(f"/port/{port}/")
-            elif scheme == 'https':
-                return redirect(f"/https/{host_port}/")
-            else:
-                return redirect(f"/address/{host_port}/")
-        except Exception as e:
-            logging.error(f"Root bounce failed: {str(e)}")
-            
-    return jsonify({"status": "DWS Gateway Active"}), 200
 
-@app.route('/<path:orphan_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-def catch_all(orphan_path):
-    proxy_target = None
+# ==========================================
+# MODULE 5: Remote Browser Isolation (Stream)
+# ==========================================
+STREAM_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DWS Remote Stream</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { margin: 0; background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; color: white;}
+        #stream-container { position: relative; max-width: 100%; max-height: 100%; box-shadow: 0 0 20px rgba(0,0,0,0.5);}
+        img { display: block; max-width: 100%; max-height: 100vh; cursor: crosshair; }
+        #loading { position: absolute; font-size: 20px; text-shadow: 1px 1px 2px black; }
+    </style>
+</head>
+<body>
+    <div id="stream-container">
+        <div id="loading">Booting Headless Host Browser...</div>
+        <img id="stream-display" src="" />
+    </div>
+
+    <script>
+        const socket = io();
+        const img = document.getElementById('stream-display');
+        const loading = document.getElementById('loading');
+
+        socket.on('connect', () => {
+            socket.emit('start_stream', { url: "{{ target_url }}" });
+        });
+
+        socket.on('stream_frame', function(data) {
+            if (loading) loading.style.display = 'none';
+            img.src = "data:image/jpeg;base64," + data.image;
+        });
+
+        img.addEventListener('click', function(e) {
+            const rect = img.getBoundingClientRect();
+            const scaleX = img.naturalWidth / rect.width;
+            const scaleY = img.naturalHeight / rect.height;
+            const clickX = Math.round((e.clientX - rect.left) * scaleX);
+            const clickY = Math.round((e.clientY - rect.top) * scaleY);
+            socket.emit('stream_click', { x: clickX, y: clickY });
+        });
+
+        window.addEventListener('keydown', function(e) {
+            // Prevent default scrolling for space/arrows
+            if(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].indexOf(e.code) > -1) {
+                e.preventDefault();
+            }
+            socket.emit('stream_keypress', { key: e.key });
+        });
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/stream/<proxy_type>/<target>')
+def stream_route(proxy_type, target):
+    if not SELENIUM_AVAILABLE:
+        return "<h3>Selenium is missing!</h3><p>To use the Stream feature, please run <code>pip install selenium</code> on the host machine.</p>", 500
+        
+    if proxy_type == 'port': target_url = f"http://127.0.0.1:{target}"
+    elif proxy_type == 'address': target_url = f"http://{target}"
+    elif proxy_type == 'https': target_url = f"https://{target}"
+    else: return "Invalid stream type", 400
+        
+    return render_template_string(STREAM_HTML, target_url=target_url)
+
+@socketio.on('start_stream')
+def handle_start_stream(data):
+    if not SELENIUM_AVAILABLE: return
     
-    referrer = request.headers.get("Referer")
-    if referrer:
-        ref_path = urlparse(referrer).path.strip('/').split('/')
-        if len(ref_path) >= 2 and ref_path[0] in ['port', 'address', 'https']:
-            proxy_type = ref_path[0]
-            host_port = ref_path[1]
-            if proxy_type == 'port':
-                proxy_target = f"http|127.0.0.1:{host_port}"
-            else:
-                scheme = 'https' if proxy_type == 'https' else 'http'
-                proxy_target = f"{scheme}|{host_port}"
-                
-    if not proxy_target:
-        proxy_target = request.cookies.get('dws_proxy_target')
+    url = data['url']
+    client_sid = request.sid
+    
+    logging.info(f"Booting headless browser stream for {url}...")
+    
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--window-size=1600,900")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--ignore-certificate-errors")
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.get(url)
+        stream_browsers[client_sid] = driver
+    except Exception as e:
+        logging.error(f"Failed to start headless browser: {e}")
+        return
+        
+    def stream_loop():
+        # Continuously take screenshots and emit them to the browser
+        while client_sid in stream_browsers:
+            try:
+                img_b64 = stream_browsers[client_sid].get_screenshot_as_base64()
+                socketio.emit('stream_frame', {'image': img_b64}, to=client_sid)
+                eventlet.sleep(0.2) # ~5 Frames Per Second
+            except Exception as e:
+                break
+    
+    socketio.start_background_task(stream_loop)
 
-    if proxy_target:
+@socketio.on('stream_click')
+def handle_stream_click(data):
+    client_sid = request.sid
+    if client_sid in stream_browsers:
+        driver = stream_browsers[client_sid]
+        x, y = data['x'], data['y']
         try:
-            scheme, host_port = proxy_target.split('|', 1)
-            if ':' in host_port:
-                host, port_str = host_port.rsplit(':', 1)
-                port = int(port_str)
-            else:
-                host = host_port
-                port = 443 if scheme == 'https' else 80
-                
-            clean_path = orphan_path
-            if orphan_path.startswith('https/') or orphan_path.startswith('http/'):
-                clean_path = orphan_path.split('/', 1)[1]
-                
-            logging.info(f"Auto-routing API/Asset '/{clean_path}' to {host}:{port}")
-            return perform_proxy(scheme, host, port, clean_path)
-        except Exception as e:
-            logging.error(f"Auto-proxy failed for {orphan_path}: {str(e)}")
-            
-    return jsonify({
-        "error": "DWS Gateway: Orphaned Target", 
-        "details": f"The Catch-All router could not determine which app the path '/{orphan_path}' belongs to."
-    }), 404
+            # Inject javascript to click the exact coordinate inside the headless browser
+            script = f"document.elementFromPoint({x}, {y}).click();"
+            driver.execute_script(script)
+        except:
+            pass
+
+@socketio.on('stream_keypress')
+def handle_stream_keypress(data):
+    client_sid = request.sid
+    if client_sid in stream_browsers:
+        driver = stream_browsers[client_sid]
+        key = data['key']
+        try:
+            # Map special keys or inject standard characters into the active input
+            active = driver.switch_to.active_element
+            if key == 'Enter': active.send_keys('\ue007')
+            elif key == 'Backspace': active.send_keys('\ue003')
+            elif len(key) == 1: active.send_keys(key)
+        except:
+            pass
+
 
 # ==========================================
 # APP EXECUTION
@@ -402,28 +371,19 @@ if __name__ == '__main__':
     # --- MODULE 2: Start the Gatekeeper ---
     gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
     if os.path.exists(gatekeeper_script):
-        logging.info("Launching high-performance concurrent Gatekeeper process via Gunicorn...")
+        logging.info("Launching Gatekeeper...")
         subprocess.Popen(
             ["gunicorn", "-w", "4", "-k", "gevent", "-b", "0.0.0.0:5050", "gatekeeper:app"],
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            close_fds=True
+            stdout=sys.stdout, stderr=sys.stderr, close_fds=True
         )
-    else:
-        logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
 
     # --- MODULE 3: Start Aurora AI ---
     aurora_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aurora.py')
     if os.path.exists(aurora_script):
-        logging.info("Launching Aurora AI module on port 5101...")
+        logging.info("Launching Aurora AI...")
         subprocess.Popen(
             [sys.executable, "aurora.py"],
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            close_fds=True
+            stdout=sys.stdout, stderr=sys.stderr, close_fds=True
         )
-    else:
-        logging.error(f"aurora.py not found at {aurora_script}. Skipping Aurora launch.")
     
-    # Start the main SocketIO app
     socketio.run(app, host='0.0.0.0', port=5000)
