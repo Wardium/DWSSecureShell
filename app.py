@@ -205,6 +205,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 
+
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
@@ -212,7 +213,6 @@ def local_port_proxy(target_port, subpath=""):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
-
 
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -231,7 +231,6 @@ def remote_http_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
 
-
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
@@ -249,7 +248,26 @@ def remote_https_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
 
+# THE NEW ROOT BOUNCER
+@app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def root_bouncer():
+    proxy_target = request.cookies.get('dws_proxy_target')
+    if proxy_target:
+        try:
+            scheme, host_port = proxy_target.split('|', 1)
+            if scheme == 'http' and host_port.startswith('127.0.0.1:'):
+                port = host_port.split(':')[1]
+                return redirect(f"/port/{port}/")
+            elif scheme == 'https':
+                return redirect(f"/https/{host_port}/")
+            else:
+                return redirect(f"/address/{host_port}/")
+        except Exception as e:
+            logging.error(f"Root bounce failed: {str(e)}")
+            
+    return jsonify({"status": "DWS Gateway Active"}), 200
 
+# THE ORPHANED ASSET CATCH-ALL
 @app.route('/<path:orphan_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def catch_all(orphan_path):
     proxy_target = None
