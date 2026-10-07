@@ -184,7 +184,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                 html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
                 html_content = html_content.replace('action="/', f'action="{base_proxy_url}/')
                 
-                # Advanced JS Interceptor with Phantom WebSocket
+                # Advanced JS Interceptor with Flawless WebSocket Counterfeit
                 js_interceptor = f"""
                 <script>
                 (function() {{
@@ -220,39 +220,44 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         return origOpen.apply(this, arguments);
                     }};
                     
-                    // Phantom WebSocket to prevent frontend crashes
+                    // The Bulletproof WebSocket Mock
                     const origWS = window.WebSocket;
                     window.WebSocket = function(url, protocols) {{
-                        console.log("[DWS Gateway] Mocking WebSocket to prevent React crash: " + url);
+                        console.log("[DWS Gateway] Counterfeiting WebSocket for: " + url);
                         
+                        const mock = Object.create(origWS.prototype);
                         const target = document.createDocumentFragment();
-                        const dummy = {{
-                            url: url,
-                            readyState: 1, // Start OPEN
-                            bufferedAmount: 0,
-                            extensions: "",
-                            protocol: "",
-                            binaryType: "blob",
-                            send: function(data) {{ console.log("[DWS Gateway] Swallowed WS send"); }},
-                            close: function() {{ this.readyState = 3; target.dispatchEvent(new Event('close')); }},
-                            addEventListener: target.addEventListener.bind(target),
-                            removeEventListener: target.removeEventListener.bind(target),
-                            dispatchEvent: target.dispatchEvent.bind(target)
-                        }};
                         
-                        Object.defineProperty(dummy, 'onmessage', {{ set: function(cb) {{ dummy.addEventListener('message', cb); }} }});
-                        Object.defineProperty(dummy, 'onopen', {{ set: function(cb) {{ dummy.addEventListener('open', cb); }} }});
-                        Object.defineProperty(dummy, 'onclose', {{ set: function(cb) {{ dummy.addEventListener('close', cb); }} }});
-                        Object.defineProperty(dummy, 'onerror', {{ set: function(cb) {{ dummy.addEventListener('error', cb); }} }});
-
+                        mock.url = url;
+                        mock.readyState = 1; // Start OPEN
+                        mock.bufferedAmount = 0;
+                        mock.extensions = "";
+                        mock.protocol = protocols ? (typeof protocols === 'string' ? protocols : protocols[0]) : "";
+                        mock.binaryType = "blob";
+                        
+                        mock.send = function() {{}};
+                        mock.close = function() {{ mock.readyState = 3; target.dispatchEvent(new Event('close')); }};
+                        mock.addEventListener = target.addEventListener.bind(target);
+                        mock.removeEventListener = target.removeEventListener.bind(target);
+                        mock.dispatchEvent = target.dispatchEvent.bind(target);
+                        
+                        ['onopen', 'onmessage', 'onerror', 'onclose'].forEach(name => {{
+                            Object.defineProperty(mock, name, {{
+                                set: function(cb) {{ target.addEventListener(name.substring(2), cb); }},
+                                get: function() {{ return null; }}
+                            }});
+                        }});
+                        
                         setTimeout(() => {{
                             const e = new Event('open');
                             target.dispatchEvent(e);
-                            if (dummy.onopen) dummy.onopen(e);
-                        }}, 100);
-
-                        return dummy;
+                            if(mock.onopen) mock.onopen(e);
+                        }}, 50);
+                        
+                        return mock;
                     }};
+                    // Make absolutely sure it passes 'instanceof WebSocket'
+                    window.WebSocket.prototype = origWS.prototype;
                 }})();
                 </script>
                 """
