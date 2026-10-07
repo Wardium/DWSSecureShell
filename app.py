@@ -100,6 +100,7 @@ def handle_disconnect():
 # MODULE 4: Local Port Forwarding Proxy
 # ==========================================
 from flask import Response
+from urllib.parse import urlparse
 import urllib3
 
 # Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
@@ -138,7 +139,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             if key.lower() not in excluded_headers:
                 # Rewrite redirects so you aren't forced out of the proxy path
                 if key.lower() == 'location':
-                    # Determine our base proxy URL
                     if target_host == '127.0.0.1' and scheme == 'http':
                         base_proxy_url = f"{request.scheme}://{request.host}/port/{target_port}"
                     elif scheme == 'https':
@@ -146,18 +146,19 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                     else:
                         base_proxy_url = f"{request.scheme}://{request.host}/address/{target_host}:{target_port}"
 
-                    # Fix relative redirects (e.g., redirecting to "/login")
                     if value.startswith('/'):
                         value = base_proxy_url + value
-                    # Fix absolute redirects
                     else:
                         value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
                         value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
-                        # Catch localhost edge cases
                         value = value.replace(f"{scheme}://127.0.0.1:{target_port}", base_proxy_url)
                         value = value.replace(f"{scheme}://localhost:{target_port}", base_proxy_url)
 
                 resp_headers.append((key, value))
+        
+        # INJECT A TRACKING COOKIE: This tells our 404 handler where orphaned assets should be routed
+        cookie_val = f"{scheme}|{target_host}:{target_port}"
+        resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
         
         # Stream the response back to the client
         return Response(
@@ -168,27 +169,61 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
     except requests.exceptions.ConnectionError:
         logging.error(f"Proxy module: Connection Refused to {target_host}:{target_port}")
-        return jsonify({
-            "error": "Connection Refused", 
-            "details": f"The target {target_host}:{target_port} is either not running or inaccessible."
-        }), 503
-        
+        return jsonify({"error": "Connection Refused", "details": f"Target {target_host}:{target_port} inaccessible."}), 503
     except requests.exceptions.Timeout:
-        logging.error(f"Proxy module: Timeout connecting to {target_host}:{target_port}")
-        return jsonify({"error": "Gateway Timeout", "details": f"Target {target_host}:{target_port} took too long to respond."}), 504
-        
+        return jsonify({"error": "Gateway Timeout", "details": f"Target {target_host}:{target_port} timed out."}), 504
     except Exception as e:
-        logging.error(f"Proxy module error connecting to {target_host}:{target_port}: {str(e)}")
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 
-# Original backwards-compatible loopback proxy (RESTORED)
+# Catch-All 404 Handler for Absolute Path Assets (Fixes white screens)
+@app.errorhandler(404)
+def proxy_orphan_assets(error):
+    proxy_target = None
+    
+    # 1. Try to extract target from Referer header first (safest for multi-tab use)
+    referrer = request.headers.get("Referer")
+    if referrer:
+        ref_path = urlparse(referrer).path.strip('/').split('/')
+        if len(ref_path) >= 2 and ref_path[0] in ['port', 'address', 'https']:
+            proxy_type = ref_path[0]
+            host_port = ref_path[1]
+            if proxy_type == 'port':
+                proxy_target = f"http|127.0.0.1:{host_port}"
+            else:
+                scheme = 'https' if proxy_type == 'https' else 'http'
+                proxy_target = f"{scheme}|{host_port}"
+                
+    # 2. If Referer didn't have it (e.g. nested assets), check our tracking cookie
+    if not proxy_target:
+        proxy_target = request.cookies.get('dws_proxy_target')
+
+    # If we found a proxy target, intercept the 404 and fetch the missing asset!
+    if proxy_target:
+        try:
+            scheme, host_port = proxy_target.split('|', 1)
+            if ':' in host_port:
+                host, port_str = host_port.rsplit(':', 1)
+                port = int(port_str)
+            else:
+                host = host_port
+                port = 443 if scheme == 'https' else 80
+                
+            subpath = request.path.lstrip('/')
+            logging.info(f"Auto-routing orphaned asset '{subpath}' to {host}:{port}")
+            return perform_proxy(scheme, host, port, subpath)
+        except Exception as e:
+            logging.error(f"Auto-proxy failed for {request.path}: {str(e)}")
+            
+    return "Not Found", 404
+
+# Original backwards-compatible loopback proxy
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
-# New HTTP address proxy
+# HTTP address proxy
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
@@ -200,10 +235,9 @@ def remote_http_proxy(host_port, subpath=""):
             host, port = host_port, 80
     except ValueError:
         return jsonify({"error": "Invalid Port", "details": "The port must be a valid number."}), 400
-        
     return perform_proxy('http', host, port, subpath)
 
-# New HTTPS address proxy
+# HTTPS address proxy
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
@@ -215,7 +249,6 @@ def remote_https_proxy(host_port, subpath=""):
             host, port = host_port, 443
     except ValueError:
         return jsonify({"error": "Invalid Port", "details": "The port must be a valid number."}), 400
-        
     return perform_proxy('https', host, port, subpath)
 
 # ==========================================
