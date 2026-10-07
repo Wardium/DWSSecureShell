@@ -108,6 +108,7 @@ import re
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def perform_proxy(scheme, target_host, target_port, subpath):
+    subpath = subpath.lstrip('/')
     target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
     
     if request.query_string:
@@ -121,10 +122,8 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             if k_lower == 'host':
                 continue
             elif k_lower == 'origin':
-                # Spoof the origin to match the target device
                 req_headers[key] = f"{scheme}://{target_host}:{target_port}"
             elif k_lower == 'referer':
-                # Spoof the referer to match the target device
                 req_headers[key] = f"{scheme}://{target_host}:{target_port}/"
             else:
                 req_headers[key] = value
@@ -141,7 +140,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        # Strip security headers that prevent proxying
+        # Strip security and length headers that prevent proxying and HTML injection
         excluded_headers = [
             'content-encoding', 'content-length', 'transfer-encoding', 'connection',
             'content-security-policy', 'content-security-policy-report-only',
@@ -149,7 +148,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         ]
         resp_headers = []
         
-        # Determine the base proxy path
         if target_host == '127.0.0.1' and scheme == 'http':
             base_proxy_url = f"/port/{target_port}"
         elif scheme == 'https':
@@ -167,25 +165,88 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
                         value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
                 
-                # UNLOCK COOKIES: Strip the local IP domain so the browser accepts it for teamexist.com
+                # UNLOCK COOKIES
                 elif key.lower() == 'set-cookie':
                     value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.IGNORECASE)
                     value = re.sub(r';\s*Path=[^;]+', '; Path=/', value, flags=re.IGNORECASE)
 
                 resp_headers.append((key, value))
         
-        # Set our catch-all tracking cookie
         cookie_val = f"{scheme}|{target_host}:{target_port}"
         resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
 
-        # HTML Rewriting for absolute paths
+        # 3. HTML AND JAVASCRIPT INJECTION (The SPA fix)
         content_type = proxied_response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
             try:
                 html_content = proxied_response.content.decode('utf-8', errors='ignore')
+                
+                # Standard HTML Rewrites
                 html_content = html_content.replace('href="/', f'href="{base_proxy_url}/')
                 html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
                 html_content = html_content.replace('action="/', f'action="{base_proxy_url}/')
+                
+                # Advanced JS Interceptor for Fetch, XHR, and WebSockets
+                js_interceptor = f"""
+                <script>
+                (function() {{
+                    const proxyBase = "{base_proxy_url}";
+                    
+                    // Hijack Fetch API
+                    const origFetch = window.fetch;
+                    window.fetch = function() {{
+                        try {{
+                            if (typeof arguments[0] === 'string' && arguments[0].startsWith('/') && !arguments[0].startsWith(proxyBase)) {{
+                                arguments[0] = proxyBase + arguments[0];
+                            }} else if (arguments[0] instanceof Request) {{
+                                const url = new URL(arguments[0].url);
+                                if (url.origin === window.location.origin && !url.pathname.startsWith(proxyBase)) {{
+                                    arguments[0] = new Request(url.origin + proxyBase + url.pathname + url.search + url.hash, arguments[0]);
+                                }}
+                            }}
+                        }} catch(e) {{}}
+                        return origFetch.apply(this, arguments);
+                    }};
+                    
+                    // Hijack XMLHttpRequest
+                    const origOpen = XMLHttpRequest.prototype.open;
+                    XMLHttpRequest.prototype.open = function() {{
+                        try {{
+                            if (typeof arguments[1] === 'string' && arguments[1].startsWith('/') && !arguments[1].startsWith(proxyBase)) {{
+                                arguments[1] = proxyBase + arguments[1];
+                            }} else if (typeof arguments[1] === 'string') {{
+                                const url = new URL(arguments[1], window.location.origin);
+                                if (url.origin === window.location.origin && !url.pathname.startsWith(proxyBase)) {{
+                                    arguments[1] = url.origin + proxyBase + url.pathname + url.search + url.hash;
+                                }}
+                            }}
+                        }} catch(e) {{}}
+                        return origOpen.apply(this, arguments);
+                    }};
+                    
+                    // Hijack WebSockets
+                    const origWS = window.WebSocket;
+                    window.WebSocket = function(url, protocols) {{
+                        try {{
+                            if (typeof url === 'string') {{
+                                const wsUrl = new URL(url);
+                                if (wsUrl.host === window.location.host && !wsUrl.pathname.startsWith(proxyBase)) {{
+                                    url = wsUrl.protocol + '//' + wsUrl.host + proxyBase + wsUrl.pathname + wsUrl.search;
+                                }}
+                            }}
+                        }} catch(e) {{}}
+                        return new origWS(url, protocols);
+                    }};
+                }})();
+                </script>
+                """
+                
+                # Inject the script gracefully into the HTML
+                if '<head>' in html_content.lower():
+                    idx = html_content.lower().find('<head>') + 6
+                    html_content = html_content[:idx] + js_interceptor + html_content[idx:]
+                else:
+                    html_content = js_interceptor + html_content
                 
                 return Response(html_content, proxied_response.status_code, resp_headers)
             except Exception as e:
@@ -205,7 +266,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 
-
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -214,7 +274,6 @@ def local_port_proxy(target_port, subpath=""):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
-
 
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -234,7 +293,6 @@ def remote_http_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
 
-
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -253,7 +311,6 @@ def remote_https_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
 
-# THE NEW ROOT BOUNCER
 @app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def root_bouncer():
     proxy_target = request.cookies.get('dws_proxy_target')
@@ -272,7 +329,6 @@ def root_bouncer():
             
     return jsonify({"status": "DWS Gateway Active"}), 200
 
-# THE ORPHANED ASSET CATCH-ALL
 @app.route('/<path:orphan_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def catch_all(orphan_path):
     proxy_target = None
@@ -287,31 +343,7 @@ def catch_all(orphan_path):
                 proxy_target = f"http|127.0.0.1:{host_port}"
             else:
                 scheme = 'https' if proxy_type == 'https' else 'http'
-                proxy_target = f"{scheme}|{host_port}"
-                
-    if not proxy_target:
-        proxy_target = request.cookies.get('dws_proxy_target')
-
-    if proxy_target:
-        try:
-            scheme, host_port = proxy_target.split('|', 1)
-            if ':' in host_port:
-                host, port_str = host_port.rsplit(':', 1)
-                port = int(port_str)
-            else:
-                host = host_port
-                port = 443 if scheme == 'https' else 80
-                
-            clean_path = orphan_path
-            if orphan_path.startswith('https/') or orphan_path.startswith('http/'):
-                clean_path = orphan_path.split('/', 1)[1]
-                
-            logging.info(f"Auto-routing API/Asset '/{clean_path}' to {host}:{port}")
-            return perform_proxy(scheme, host, port, clean_path)
-        except Exception as e:
-            logging.error(f"Auto-proxy failed for {orphan_path}: {str(e)}")
-            
-    return "Not Found", 404
+                proxy_target =
 
 # ==========================================
 # APP EXECUTION
