@@ -136,28 +136,26 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         
         for key, value in proxied_response.raw.headers.items():
             if key.lower() not in excluded_headers:
-                # Rewrite absolute redirects so you aren't forced back to the internal URL
+                # Rewrite redirects so you aren't forced out of the proxy path
                 if key.lower() == 'location':
-                    # Determine how the client got here so we rewrite the redirect appropriately
+                    # Determine our base proxy URL
                     if target_host == '127.0.0.1' and scheme == 'http':
-                        host_replacement = f"{request.scheme}://{request.host}/port/{target_port}"
+                        base_proxy_url = f"{request.scheme}://{request.host}/port/{target_port}"
                     elif scheme == 'https':
-                        host_replacement = f"{request.scheme}://{request.host}/https/{target_host}:{target_port}"
+                        base_proxy_url = f"{request.scheme}://{request.host}/https/{target_host}:{target_port}"
                     else:
-                        host_replacement = f"{request.scheme}://{request.host}/address/{target_host}:{target_port}"
+                        base_proxy_url = f"{request.scheme}://{request.host}/address/{target_host}:{target_port}"
 
-                    # Replace exact matches with port
-                    value = value.replace(f"{scheme}://{target_host}:{target_port}", host_replacement)
-                    
-                    # Replace matches without port if using default HTTP(S) ports
-                    if (scheme == 'http' and int(target_port) == 80) or (scheme == 'https' and int(target_port) == 443):
-                        value = value.replace(f"{scheme}://{target_host}", host_replacement)
-                        
-                    # Catch localhost edge cases for the legacy local port proxy
-                    if target_host == '127.0.0.1':
-                        value = value.replace(f"{scheme}://localhost:{target_port}", host_replacement)
-                        if int(target_port) == 80:
-                            value = value.replace(f"{scheme}://localhost", host_replacement)
+                    # Fix relative redirects (e.g., redirecting to "/login")
+                    if value.startswith('/'):
+                        value = base_proxy_url + value
+                    # Fix absolute redirects
+                    else:
+                        value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
+                        value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
+                        # Catch localhost edge cases
+                        value = value.replace(f"{scheme}://127.0.0.1:{target_port}", base_proxy_url)
+                        value = value.replace(f"{scheme}://localhost:{target_port}", base_proxy_url)
 
                 resp_headers.append((key, value))
         
@@ -184,7 +182,13 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 
-# Original backwards-compatible loopback proxy
+# Original backwards-compatible loopback proxy (RESTORED)
+@app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+@app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def local_port_proxy(target_port, subpath=""):
+    return perform_proxy('http', '127.0.0.1', target_port, subpath)
+
+# New HTTP address proxy
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
@@ -199,6 +203,7 @@ def remote_http_proxy(host_port, subpath=""):
         
     return perform_proxy('http', host, port, subpath)
 
+# New HTTPS address proxy
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
@@ -220,12 +225,9 @@ if __name__ == '__main__':
     logging.info("Starting DWS Server Shell backend...")
     
     # --- MODULE 2: Start the Gatekeeper ---
-    # Determine the absolute path to gatekeeper.py to ensure it fires reliably
     gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
-    
     if os.path.exists(gatekeeper_script):
         logging.info("Launching high-performance concurrent Gatekeeper process via Gunicorn...")
-        # Spawns Gunicorn with 4 asynchronous gevent workers handling port 5050
         subprocess.Popen(
             ["gunicorn", "-w", "4", "-k", "gevent", "-b", "0.0.0.0:5050", "gatekeeper:app"],
             stdout=sys.stdout,
@@ -234,15 +236,11 @@ if __name__ == '__main__':
         )
     else:
         logging.error(f"gatekeeper.py not found at {gatekeeper_script}. Skipping Gatekeeper launch.")
-    # --------------------------------------
 
     # --- MODULE 3: Start Aurora AI ---
-    # Determine the absolute path to aurora.py
     aurora_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aurora.py')
-    
     if os.path.exists(aurora_script):
         logging.info("Launching Aurora AI module on port 5101...")
-        # Spawns Aurora using the current Python environment (sys.executable)
         subprocess.Popen(
             [sys.executable, "aurora.py"],
             stdout=sys.stdout,
@@ -251,7 +249,6 @@ if __name__ == '__main__':
         )
     else:
         logging.error(f"aurora.py not found at {aurora_script}. Skipping Aurora launch.")
-    # --------------------------------------
     
-    # Start the main SocketIO app (blocking call)
+    # Start the main SocketIO app
     socketio.run(app, host='0.0.0.0', port=5000)
