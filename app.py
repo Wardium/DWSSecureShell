@@ -225,7 +225,6 @@ def remote_https_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
 
-
 # ==========================================
 # MODULE 5: Remote Browser Isolation (Stream)
 # ==========================================
@@ -238,13 +237,13 @@ STREAM_HTML = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; overflow: hidden; font-family: sans-serif; color: white; }
-        /* The image will now stretch to perfectly fill your window exactly as the host renders it */
-        img { width: 100vw; height: 100vh; object-fit: fill; cursor: crosshair; }
+        /* Using contain ensures the aspect ratio stays perfect so the coordinates don't distort */
+        img { width: 100vw; height: 100vh; object-fit: contain; cursor: crosshair; }
         #loading { position: absolute; font-size: 20px; text-shadow: 1px 1px 2px black; }
     </style>
 </head>
 <body>
-    <div id="loading">Booting Headless Host Browser...</div>
+    <div id="loading">Booting Hardware-Accelerated Stream...</div>
     <img id="stream-display" src="" />
 
     <script>
@@ -253,7 +252,6 @@ STREAM_HTML = """
         const loading = document.getElementById('loading');
 
         socket.on('connect', () => {
-            // Tell the backend exactly how big your window is so it scales 1:1 without borders
             socket.emit('start_stream', { 
                 url: "{{ target_url }}",
                 width: window.innerWidth,
@@ -263,13 +261,19 @@ STREAM_HTML = """
 
         socket.on('stream_frame', function(data) {
             if (loading) loading.style.display = 'none';
+            // We are now receiving highly compressed JPEGs straight from Chrome
             img.src = "data:image/jpeg;base64," + data.image;
         });
 
         img.addEventListener('click', function(e) {
-            // Because the image is now exactly 1:1 with the headless browser, 
-            // we can send the exact raw mouse coordinates!
-            socket.emit('stream_click', { x: e.clientX, y: e.clientY });
+            const rect = img.getBoundingClientRect();
+            // Calculate exact coordinates relative to the actual image size inside the letterbox
+            const scaleX = img.naturalWidth / rect.width;
+            const scaleY = img.naturalHeight / rect.height;
+            const clickX = Math.round((e.clientX - rect.left) * scaleX);
+            const clickY = Math.round((e.clientY - rect.top) * scaleY);
+            
+            socket.emit('stream_click', { x: clickX, y: clickY });
         });
 
         window.addEventListener('keydown', function(e) {
@@ -300,12 +304,11 @@ def handle_start_stream(data):
     if not SELENIUM_AVAILABLE: return
     
     url = data['url']
-    # Grab the user's exact screen dimensions (fallback to 1920x1080)
     width = int(data.get('width', 1920))
     height = int(data.get('height', 1080))
-    
     client_sid = request.sid
-    logging.info(f"Booting {width}x{height} headless browser stream for {url}...")
+    
+    logging.info(f"Booting optimized {width}x{height} stream for {url}...")
     
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -325,10 +328,15 @@ def handle_start_stream(data):
     def stream_loop():
         while client_sid in stream_browsers:
             try:
-                img_b64 = stream_browsers[client_sid].get_screenshot_as_base64()
-                socketio.emit('stream_frame', {'image': img_b64}, to=client_sid)
-                # Reduced sleep time from 0.2 to 0.1 to double the framerate/responsiveness
-                eventlet.sleep(0.1) 
+                # OPTIMIZATION: Shift processing to Chrome. Ask for a 60% quality JPEG instead of a lossless PNG.
+                # This drops the file size from ~4MB to ~150KB, massively increasing stream speed!
+                res = stream_browsers[client_sid].execute_cdp_cmd('Page.captureScreenshot', {
+                    'format': 'jpeg',
+                    'quality': 60
+                })
+                
+                socketio.emit('stream_frame', {'image': res['data']}, to=client_sid)
+                eventlet.sleep(0.1) # 10 Frames Per Second
             except Exception as e:
                 break
     
@@ -339,25 +347,18 @@ def handle_stream_click(data):
     client_sid = request.sid
     if client_sid in stream_browsers:
         driver = stream_browsers[client_sid]
-        x, y = data['x'], data['y']
+        x, y = int(data['x']), int(data['y'])
         try:
-            # Inject a true DOM MouseEvent to trick React/Vue into registering a real human click
-            script = f"""
-            var el = document.elementFromPoint({x}, {y});
-            if (el) {{
-                var ev = new MouseEvent('click', {{
-                    view: window,
-                    bubbles: true,
-                    cancelable: true,
-                    clientX: {x},
-                    clientY: {y}
-                }});
-                el.dispatchEvent(ev);
-            }}
-            """
-            driver.execute_script(script)
-        except:
-            pass
+            # FIX: Hardware-level Mouse Clicks via Chrome DevTools Protocol
+            # This completely bypasses React/Vue's fake click blockers
+            driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1
+            })
+            driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
+                'type': 'mouseReleased', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1
+            })
+        except Exception as e:
+            logging.error(f"Stream click failed: {e}")
 
 @socketio.on('stream_keypress')
 def handle_stream_keypress(data):
@@ -372,7 +373,6 @@ def handle_stream_keypress(data):
             elif len(key) == 1: active.send_keys(key)
         except:
             pass
-
 
 # ==========================================
 # APP EXECUTION
