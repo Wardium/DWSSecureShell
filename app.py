@@ -105,6 +105,11 @@ def handle_disconnect():
 # ==========================================
 def perform_proxy(scheme, target_host, target_port, subpath):
     subpath = subpath.lstrip('/')
+    
+    # Block Cloudflare analytics from spamming the target server with 405 errors
+    if subpath.startswith('cdn-cgi/'):
+        return Response(status=204)
+        
     target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
     
     if request.query_string:
@@ -136,7 +141,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        # Strip security and length headers
         excluded_headers = [
             'content-encoding', 'content-length', 'transfer-encoding', 'connection',
             'content-security-policy', 'content-security-policy-report-only',
@@ -161,7 +165,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
                         value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
                 
-                # UNLOCK COOKIES
                 elif key.lower() == 'set-cookie':
                     value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.IGNORECASE)
                     value = re.sub(r';\s*Path=[^;]+', '; Path=/', value, flags=re.IGNORECASE)
@@ -177,12 +180,11 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             try:
                 html_content = proxied_response.content.decode('utf-8', errors='ignore')
                 
-                # Standard HTML Rewrites
                 html_content = html_content.replace('href="/', f'href="{base_proxy_url}/')
                 html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
                 html_content = html_content.replace('action="/', f'action="{base_proxy_url}/')
                 
-                # Advanced JS Interceptor
+                # Advanced JS Interceptor with Phantom WebSocket
                 js_interceptor = f"""
                 <script>
                 (function() {{
@@ -218,17 +220,38 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                         return origOpen.apply(this, arguments);
                     }};
                     
+                    // Phantom WebSocket to prevent frontend crashes
                     const origWS = window.WebSocket;
                     window.WebSocket = function(url, protocols) {{
-                        try {{
-                            if (typeof url === 'string') {{
-                                const wsUrl = new URL(url);
-                                if (wsUrl.host === window.location.host && !wsUrl.pathname.startsWith(proxyBase)) {{
-                                    url = wsUrl.protocol + '//' + wsUrl.host + proxyBase + wsUrl.pathname + wsUrl.search;
-                                }}
-                            }}
-                        }} catch(e) {{}}
-                        return new origWS(url, protocols);
+                        console.log("[DWS Gateway] Mocking WebSocket to prevent React crash: " + url);
+                        
+                        const target = document.createDocumentFragment();
+                        const dummy = {{
+                            url: url,
+                            readyState: 1, // Start OPEN
+                            bufferedAmount: 0,
+                            extensions: "",
+                            protocol: "",
+                            binaryType: "blob",
+                            send: function(data) {{ console.log("[DWS Gateway] Swallowed WS send"); }},
+                            close: function() {{ this.readyState = 3; target.dispatchEvent(new Event('close')); }},
+                            addEventListener: target.addEventListener.bind(target),
+                            removeEventListener: target.removeEventListener.bind(target),
+                            dispatchEvent: target.dispatchEvent.bind(target)
+                        }};
+                        
+                        Object.defineProperty(dummy, 'onmessage', {{ set: function(cb) {{ dummy.addEventListener('message', cb); }} }});
+                        Object.defineProperty(dummy, 'onopen', {{ set: function(cb) {{ dummy.addEventListener('open', cb); }} }});
+                        Object.defineProperty(dummy, 'onclose', {{ set: function(cb) {{ dummy.addEventListener('close', cb); }} }});
+                        Object.defineProperty(dummy, 'onerror', {{ set: function(cb) {{ dummy.addEventListener('error', cb); }} }});
+
+                        setTimeout(() => {{
+                            const e = new Event('open');
+                            target.dispatchEvent(e);
+                            if (dummy.onopen) dummy.onopen(e);
+                        }}, 100);
+
+                        return dummy;
                     }};
                 }})();
                 </script>
