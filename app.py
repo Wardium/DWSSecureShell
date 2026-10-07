@@ -99,9 +99,10 @@ def handle_disconnect():
 # ==========================================
 # MODULE 4: Local Port Forwarding Proxy
 # ==========================================
-from flask import Response, redirect
+from flask import Response, redirect, request, jsonify
 from urllib.parse import urlparse
 import urllib3
+import re
 
 # Suppress insecure request warnings for self-signed certificates on local HTTPS endpoints
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -113,8 +114,20 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
         
     try:
-        # Strip the original Host header
-        req_headers = {key: value for key, value in request.headers if key.lower() != 'host'}
+        # 1. COUNTERFEIT THE INBOUND HEADERS (Bypass CORS/CSRF protections)
+        req_headers = {}
+        for key, value in request.headers:
+            k_lower = key.lower()
+            if k_lower == 'host':
+                continue
+            elif k_lower == 'origin':
+                # Spoof the origin to match the target device
+                req_headers[key] = f"{scheme}://{target_host}:{target_port}"
+            elif k_lower == 'referer':
+                # Spoof the referer to match the target device
+                req_headers[key] = f"{scheme}://{target_host}:{target_port}/"
+            else:
+                req_headers[key] = value
         
         proxied_response = requests.request(
             method=request.method,
@@ -128,7 +141,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        # STRIP SECURITY HEADERS that prevent the browser from loading assets via the proxy domain
+        # Strip security headers that prevent proxying
         excluded_headers = [
             'content-encoding', 'content-length', 'transfer-encoding', 'connection',
             'content-security-policy', 'content-security-policy-report-only',
@@ -136,7 +149,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         ]
         resp_headers = []
         
-        # Determine the base proxy path to use for rewrites
+        # Determine the base proxy path
         if target_host == '127.0.0.1' and scheme == 'http':
             base_proxy_url = f"/port/{target_port}"
         elif scheme == 'https':
@@ -144,6 +157,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         else:
             base_proxy_url = f"/address/{target_host}:{target_port}"
             
+        # 2. REWRITE OUTBOUND HEADERS (Fix Redirects and Cookies)
         for key, value in proxied_response.raw.headers.items():
             if key.lower() not in excluded_headers:
                 if key.lower() == 'location':
@@ -152,9 +166,15 @@ def perform_proxy(scheme, target_host, target_port, subpath):
                     else:
                         value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
                         value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
+                
+                # UNLOCK COOKIES: Strip the local IP domain so the browser accepts it for teamexist.com
+                elif key.lower() == 'set-cookie':
+                    value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.IGNORECASE)
+                    value = re.sub(r';\s*Path=[^;]+', '; Path=/', value, flags=re.IGNORECASE)
+
                 resp_headers.append((key, value))
         
-        # Set a cookie so our Catch-All knows where to send orphaned API requests
+        # Set our catch-all tracking cookie
         cookie_val = f"{scheme}|{target_host}:{target_port}"
         resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
 
@@ -171,7 +191,6 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             except Exception as e:
                 logging.error(f"HTML Rewrite failed: {str(e)}")
 
-        # If it's not HTML, stream the response normally
         return Response(
             proxied_response.iter_content(chunk_size=10*1024), 
             proxied_response.status_code, 
@@ -189,11 +208,11 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
-    # FORCE TRAILING SLASH for base URLs to prevent the browser from mangling relative asset paths
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
+
 
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -211,6 +230,7 @@ def remote_http_proxy(host_port, subpath=""):
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
+
 
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -259,12 +279,11 @@ def catch_all(orphan_path):
                 host = host_port
                 port = 443 if scheme == 'https' else 80
                 
-            # If the path got mangled to include the scheme prefix (e.g., https/locales/...), slice it out
             clean_path = orphan_path
             if orphan_path.startswith('https/') or orphan_path.startswith('http/'):
                 clean_path = orphan_path.split('/', 1)[1]
                 
-            logging.info(f"Auto-routing orphaned request '/{clean_path}' to {host}:{port}")
+            logging.info(f"Auto-routing API/Asset '/{clean_path}' to {host}:{port}")
             return perform_proxy(scheme, host, port, clean_path)
         except Exception as e:
             logging.error(f"Auto-proxy failed for {orphan_path}: {str(e)}")
