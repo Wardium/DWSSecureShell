@@ -8,3 +8,4 @@ gevent
 flask-cors
 duckduckgo_search
 DDGS
+selenium
