@@ -99,7 +99,7 @@ def handle_disconnect():
 # ==========================================
 # MODULE 4: Local Port Forwarding Proxy
 # ==========================================
-from flask import Response
+from flask import Response, redirect
 from urllib.parse import urlparse
 import urllib3
 
@@ -128,7 +128,12 @@ def perform_proxy(scheme, target_host, target_port, subpath):
             verify=False 
         )
         
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        # STRIP SECURITY HEADERS that prevent the browser from loading assets via the proxy domain
+        excluded_headers = [
+            'content-encoding', 'content-length', 'transfer-encoding', 'connection',
+            'content-security-policy', 'content-security-policy-report-only',
+            'x-frame-options', 'strict-transport-security'
+        ]
         resp_headers = []
         
         # Determine the base proxy path to use for rewrites
@@ -153,11 +158,10 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         cookie_val = f"{scheme}|{target_host}:{target_port}"
         resp_headers.append(('Set-Cookie', f"dws_proxy_target={cookie_val}; Path=/; SameSite=Lax"))
 
-        # --- THE FIX: HTML REWRITING ---
+        # HTML Rewriting for absolute paths
         content_type = proxied_response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
             try:
-                # Read the HTML and rewrite absolute paths to point at our proxy!
                 html_content = proxied_response.content.decode('utf-8', errors='ignore')
                 html_content = html_content.replace('href="/', f'href="{base_proxy_url}/')
                 html_content = html_content.replace('src="/', f'src="{base_proxy_url}/')
@@ -182,16 +186,22 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
 
 
-# Original backwards-compatible loopback proxy
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
+    # FORCE TRAILING SLASH for base URLs to prevent the browser from mangling relative asset paths
+    if not subpath and not request.path.endswith('/'):
+        qs = request.query_string.decode('utf-8')
+        return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
-# HTTP address proxy
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
+    if not subpath and not request.path.endswith('/'):
+        qs = request.query_string.decode('utf-8')
+        return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
+        
     try:
         if ':' in host_port:
             host, port_str = host_port.rsplit(':', 1)
@@ -202,10 +212,13 @@ def remote_http_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
 
-# HTTPS address proxy
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
+    if not subpath and not request.path.endswith('/'):
+        qs = request.query_string.decode('utf-8')
+        return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
+        
     try:
         if ':' in host_port:
             host, port_str = host_port.rsplit(':', 1)
@@ -216,12 +229,11 @@ def remote_https_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
 
-# THE FIX: TRUE CATCH-ALL ROUTE FOR ORPHANED ASSETS
+
 @app.route('/<path:orphan_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def catch_all(orphan_path):
     proxy_target = None
     
-    # Check if the browser told us where this request came from
     referrer = request.headers.get("Referer")
     if referrer:
         ref_path = urlparse(referrer).path.strip('/').split('/')
@@ -234,11 +246,9 @@ def catch_all(orphan_path):
                 scheme = 'https' if proxy_type == 'https' else 'http'
                 proxy_target = f"{scheme}|{host_port}"
                 
-    # Fallback to the cookie we injected earlier
     if not proxy_target:
         proxy_target = request.cookies.get('dws_proxy_target')
 
-    # Intercept and proxy!
     if proxy_target:
         try:
             scheme, host_port = proxy_target.split('|', 1)
@@ -249,8 +259,13 @@ def catch_all(orphan_path):
                 host = host_port
                 port = 443 if scheme == 'https' else 80
                 
-            logging.info(f"Auto-routing orphaned request '/{orphan_path}' to {host}:{port}")
-            return perform_proxy(scheme, host, port, orphan_path)
+            # If the path got mangled to include the scheme prefix (e.g., https/locales/...), slice it out
+            clean_path = orphan_path
+            if orphan_path.startswith('https/') or orphan_path.startswith('http/'):
+                clean_path = orphan_path.split('/', 1)[1]
+                
+            logging.info(f"Auto-routing orphaned request '/{clean_path}' to {host}:{port}")
+            return perform_proxy(scheme, host, port, clean_path)
         except Exception as e:
             logging.error(f"Auto-proxy failed for {orphan_path}: {str(e)}")
             
