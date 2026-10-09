@@ -387,6 +387,41 @@ def handle_stream_keypress(data):
 # ==========================================
 
 if __name__ == '__main__':
+
+# ==========================================
+# CATCH-ALL ASSET REDIRECTOR
+# ==========================================
+@app.route('/<path:missing_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
+def catch_all_fallback(missing_path):
+    """
+    Catches 404 requests for root-relative assets (like /assets/main.js)
+    and redirects them to the correct proxy path using the Referer header.
+    """
+    referer = request.headers.get('Referer')
+    if referer:
+        parsed_referer = urlparse(referer)
+        # Check if the page requesting the asset is one of our proxy endpoints
+        match = re.match(r'^/(port|address|https)/([^/]+)', parsed_referer.path)
+        if match:
+            proxy_type = match.group(1)
+            host_port = match.group(2)
+            
+            # Reconstruct the correct path (e.g., /https/192.168.2.111:8971/assets/main.js)
+            correct_path = f"/{proxy_type}/{host_port}/{missing_path}"
+            
+            if request.query_string:
+                correct_path += f"?{request.query_string.decode('utf-8')}"
+                
+            # Use 307 to preserve the original HTTP method (GET/POST)
+            return redirect(correct_path, code=307)
+            
+    return jsonify({"error": "Not Found"}), 404
+
+
+    
+
+    
+    
     logging.info("Starting DWS Server Shell backend...")
     
     # --- MODULE 2: Start the Gatekeeper ---
