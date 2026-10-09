@@ -203,9 +203,13 @@ def remote_http_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
+        
     try:
-        host, port_str = host_port.rsplit(':', 1) if ':' in host_port else (host_port, 80)
-        port = int(port_str)
+        if ':' in host_port:
+            host, port_str = host_port.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host, port = host_port, 80
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
@@ -218,9 +222,13 @@ def remote_https_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
+        
     try:
-        host, port_str = host_port.rsplit(':', 1) if ':' in host_port else (host_port, 443)
-        port = int(port_str)
+        if ':' in host_port:
+            host, port_str = host_port.rsplit(':', 1)
+            port = int(port_str)
+        else:
+            host, port = host_port, 443
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
