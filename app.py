@@ -172,11 +172,18 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 
                 resp_headers.append((key, value))
         
-        return Response(
+        # Create the response object
+        response = Response(
             proxied_response.iter_content(chunk_size=10*1024), 
             proxied_response.status_code, 
             resp_headers
         )
+        
+        # STICKY SESSION: Remember the target so SPA client-side routing doesn't break
+        target_identifier = f"{scheme}://{target_host}:{target_port}"
+        response.set_cookie('dws_active_target', target_identifier, path='/')
+        
+        return response
 
     except requests.exceptions.ConnectionError:
         return jsonify({"error": "Connection Refused", "details": f"Target {target_host}:{target_port} inaccessible."}), 503
@@ -383,33 +390,47 @@ def handle_stream_keypress(data):
             pass
 
 # ==========================================
-# CATCH-ALL ASSET REDIRECTOR
+# CATCH-ALL ASSET & SPA REDIRECTOR
 # ==========================================
+@app.route('/', defaults={'missing_path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/<path:missing_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def catch_all_fallback(missing_path):
     """
-    Catches 404 requests for root-relative assets (like /assets/main.js)
-    and redirects them to the correct proxy path using the Referer header.
+    Handles cases where the web app's client-side router drops the proxy prefix
+    (e.g., changes the URL to /login). It uses the Referer or a sticky cookie to route it.
     """
+    # 1. Try Referer first (Most accurate if present)
     referer = request.headers.get('Referer')
     if referer:
         parsed_referer = urlparse(referer)
-        # Check if the page requesting the asset is one of our proxy endpoints
         match = re.match(r'^/(port|address|https)/([^/]+)', parsed_referer.path)
         if match:
             proxy_type = match.group(1)
             host_port = match.group(2)
-            
-            # Reconstruct the correct path (e.g., /https/192.168.2.111:8971/assets/main.js)
             correct_path = f"/{proxy_type}/{host_port}/{missing_path}"
-            
             if request.query_string:
                 correct_path += f"?{request.query_string.decode('utf-8')}"
-                
-            # Use 307 to preserve the original HTTP method (GET/POST)
             return redirect(correct_path, code=307)
+
+    # 2. SPA Fallback: Use the sticky cookie we set during the initial load
+    active_target = request.cookies.get('dws_active_target')
+    if active_target:
+        try:
+            parsed_target = urlparse(active_target)
+            scheme = parsed_target.scheme
+            host = parsed_target.hostname
+            # Default to standard ports if not specified in the URL
+            port = parsed_target.port or (443 if scheme == 'https' else 80)
             
-    return jsonify({"error": "Not Found"}), 404
+            # Proxy directly to prevent the browser's address bar from flickering
+            return perform_proxy(scheme, host, port, missing_path)
+        except Exception as e:
+            logging.error(f"Fallback proxy error for SPA routing: {e}")
+
+    return jsonify({
+        "error": "Not Found", 
+        "details": "No active target session found. Try loading the device through the main proxy URL first."
+    }), 404
 
 
 # ==========================================
