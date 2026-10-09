@@ -383,12 +383,6 @@ def handle_stream_keypress(data):
             pass
 
 # ==========================================
-# APP EXECUTION
-# ==========================================
-
-if __name__ == '__main__':
-
-# ==========================================
 # CATCH-ALL ASSET REDIRECTOR
 # ==========================================
 @app.route('/<path:missing_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -418,10 +412,13 @@ def catch_all_fallback(missing_path):
     return jsonify({"error": "Not Found"}), 404
 
 
-    
+# ==========================================
+# APP EXECUTION
+# ==========================================
 
-    
-    
+if __name__ == '__main__':
+
+
     logging.info("Starting DWS Server Shell backend...")
     
     # --- MODULE 2: Start the Gatekeeper ---
