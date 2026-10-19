@@ -270,19 +270,30 @@ def verify_access():
     print(f"[Gatekeeper] 2. Request from IP: {client_ip} | Origin: {origin}", flush=True)
 
     session_token = request.cookies.get('dws_auth')
+    has_cookie = session_token is not None
     is_valid = check_token(session_token) 
 
     if is_valid:
         print("[Gatekeeper] 4. Access GRANTED.", flush=True)
-        # Remember to update this to your actual dashboard URL
         response = jsonify({
             "authorized": True,
-            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com" 
+            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com",
+            "debug": {
+                "cookie_received": has_cookie,
+                "origin_seen": origin,
+                "status": "Valid dws_auth token!"
+            }
         })
     else:
-        print("[Gatekeeper] 4. Access DENIED.", flush=True)
+        reason = "Cookie 'dws_auth' was received, but check_token() returned False." if has_cookie else "No 'dws_auth' cookie was sent by the browser."
+        print(f"[Gatekeeper] 4. Access DENIED. ({reason})", flush=True)
         response = jsonify({
-            "authorized": False
+            "authorized": False,
+            "debug": {
+                "cookie_received": has_cookie,
+                "origin_seen": origin,
+                "reason": reason
+            }
         })
         
     # --- 3. Force the Headers on the Final Output ---
