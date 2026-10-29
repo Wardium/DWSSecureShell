@@ -46,7 +46,7 @@ stream_browsers = {}  # Tracks headless browsers for the Stream feature
 # MODULE 1: DWS Server Shell
 # ==========================================
 SERVERS = {
-    "1": {"host": "192.168.2.111", "user": "dylan", "password": "weqr1234"},
+    "1": {"host": "192.168.2.143", "user": "dylan", "password": "weqr1234"},
     "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
     "3": {"host": "192.168.2.134", "user": "dylan", "password": "sIjkew-1qixwe-sogcog"}
 }
