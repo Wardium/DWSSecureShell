@@ -66,6 +66,9 @@ SERVERS = {
     "3": {"host": "192.168.2.134", "user": "dylan", "password": "sIjkew-1qixwe-sogcog"}
 }
 
+# Stores {"ssh": ssh_client, "channel": ssh_channel} mapped by request.sid
+active_sessions = {}
+
 @app.route('/shell/<server_id>')
 def shell(server_id):
     if server_id not in SERVERS:
@@ -79,6 +82,10 @@ def handle_ssh_connection(data):
     if server_id not in SERVERS:
         return
 
+    # Grab initial terminal dimensions sent from the browser (fallback to 80x24)
+    cols = data.get('cols', 80)
+    rows = data.get('rows', 24)
+
     server = SERVERS[server_id]
     client_sid = request.sid  
     
@@ -87,41 +94,71 @@ def handle_ssh_connection(data):
 
     try:
         ssh.connect(server['host'], username=server['user'], password=server['password'], timeout=5)
-        channel = ssh.invoke_shell()
-        active_sessions[client_sid] = ssh
-        logging.info(f"SUCCESS: SSH session established for {server['host']}")
+        
+        # Invoke shell with xterm-256color for full ANSI color support and exact initial dimensions
+        channel = ssh.invoke_shell(term='xterm-256color', width=cols, height=rows)
+        
+        active_sessions[client_sid] = {
+            'ssh': ssh,
+            'channel': channel
+        }
+        logging.info(f"SUCCESS: SSH session established for {server['host']} ({cols}x{rows})")
 
-        def listen_to_ssh():
-            while not channel.closed:
+        def listen_to_ssh(sid, chan):
+            while not chan.closed:
                 try:
-                    output = channel.recv(1024).decode('utf-8')
-                    if output:
-                        socketio.emit('ssh_output', {'output': output}, to=client_sid)
-                except:
+                    data = chan.recv(4096)
+                    if not data:
+                        break
+                    # errors='replace' prevents crashes if a multi-byte UTF-8 character splits across chunks
+                    output = data.decode('utf-8', errors='replace')
+                    socketio.emit('ssh_output', {'output': output}, to=sid)
+                except Exception:
                     break
 
-        socketio.start_background_task(listen_to_ssh)
-
-        @socketio.on('ssh_input')
-        def handle_input(input_data):
-            if not channel.closed:
-                channel.send(input_data['input'])
+        socketio.start_background_task(listen_to_ssh, client_sid, channel)
 
     except Exception as e:
-        socketio.emit('ssh_output', {'output': f'\r\n[!] Connection failed: {str(e)}\r\n'}, to=client_sid)
+        socketio.emit('ssh_output', {'output': f'\r\n\x1b[1;31m[!] Connection failed: {str(e)}\x1b[0m\r\n'}, to=client_sid)
+
+@socketio.on('ssh_input')
+def handle_input(input_data):
+    session = active_sessions.get(request.sid)
+    if session:
+        channel = session['channel']
+        if not channel.closed:
+            channel.send(input_data.get('input', ''))
+
+@socketio.on('ssh_resize')
+def handle_resize(data):
+    session = active_sessions.get(request.sid)
+    if session:
+        channel = session['channel']
+        if not channel.closed:
+            cols = data.get('cols', 80)
+            rows = data.get('rows', 24)
+            try:
+                # Dynamically resize the Linux PTY so line-wrapping and nano/htop/vim scale properly
+                channel.resize_pty(width=cols, height=rows)
+            except Exception as e:
+                logging.error(f"Failed to resize PTY: {e}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
     session_id = request.sid
     if session_id in active_sessions:
-        active_sessions[session_id].close()
+        try:
+            active_sessions[session_id]['channel'].close()
+            active_sessions[session_id]['ssh'].close()
+        except Exception:
+            pass
         del active_sessions[session_id]
         
     # Cleanup orphaned streams
     if session_id in stream_browsers:
         try:
             stream_browsers[session_id].quit()
-        except:
+        except Exception:
             pass
         del stream_browsers[session_id]
 
