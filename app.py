@@ -201,7 +201,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         resp_headers = []
         
-        if target_host == '0.0.0.0' and scheme == 'http':
+        if target_host == '127.0.0.1' and scheme == 'http':
             base_proxy_url = f"/port/{target_port}"
         elif scheme == 'https':
             base_proxy_url = f"/https/{target_host}:{target_port}"
@@ -252,7 +252,8 @@ def local_port_proxy(target_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-    return perform_proxy('http', '0.0.0.0', target_port, subpath)
+    # FIXED: Use 127.0.0.1 instead of 0.0.0.0 so Docker container loopback bindings accept connections
+    return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
 
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -440,6 +441,138 @@ def handle_stream_keypress(data):
             elif len(key) == 1: active.send_keys(key)
         except:
             pass
+
+# ==========================================
+# MODULE 7: LAN & Docker Port Finder
+# ==========================================
+import socket
+from concurrent.futures import ThreadPoolExecutor
+
+COMMON_PORTS = [80, 443, 3000, 5000, 5050, 8000, 8080, 8123, 8989, 9000, 9090, 6881]
+
+def scan_single_target(ip, port):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        result = s.connect_ex((ip, port))
+        s.close()
+        if result == 0:
+            # Try to grab HTTP title or banner
+            scheme = "https" if port == 443 or port == 8443 else "http"
+            url = f"{scheme}://{ip}:{port}"
+            title = "Active Service"
+            try:
+                resp = requests.get(url, timeout=0.8, verify=False)
+                if resp.status_code < 400:
+                    match = re.search(r'<title>(.*?)</title>', resp.text, re.IGNORECASE)
+                    if match:
+                        title = match.group(1).strip()[:40]
+            except Exception:
+                pass
+            return {"ip": ip, "port": port, "url": url, "title": title, "status": "Online"}
+    except Exception:
+        pass
+    return None
+
+FINDER_DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DWS LAN Finder</title>
+    <style>
+        body { margin: 0; padding: 24px; background: #0d1117; color: #c9d1d9; font-family: monospace; }
+        h1 { color: #58a6ff; margin-top: 0; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+        button { background: #238636; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
+        button:hover { background: #2ea043; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #21262d; }
+        th { color: #8b949e; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .badge { padding: 3px 8px; border-radius: 4px; background: #238636; color: #fff; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>DWS LAN & Host Finder</h1>
+    <div class="card">
+        <p>Scans local loopback ports, local docker bridges, and active subnet IPs for web services and APIs.</p>
+        <button onclick="startScan()" id="scan-btn">Scan Network Now</button>
+        <span id="status-msg" style="margin-left: 15px; color: #8b949e;">Ready.</span>
+    </div>
+    <div class="card">
+        <h2>Discovered Endpoints</h2>
+        <table>
+            <thead>
+                <tr><th>IP / Host</th><th>Port</th><th>Detected Title / Service</th><th>Proxy Link</th></tr>
+            </thead>
+            <tbody id="results-table">
+                <tr><td colspan="4" style="color: #8b949e;">Click 'Scan Network Now' to begin.</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <script>
+        async function startScan() {
+            const btn = document.getElementById('scan-btn');
+            const msg = document.getElementById('status-msg');
+            const tbody = document.getElementById('results-table');
+            btn.disabled = true;
+            msg.innerText = "Scanning network ports and hosts...";
+            tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Scan in progress... Please wait.</td></tr>`;
+            
+            try {
+                const res = await fetch('/finder/scan');
+                const data = await res.json();
+                msg.innerText = `Scan complete. Found ${data.services.length} active service(s).`;
+                if(data.services.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4">No services discovered.</td></tr>`;
+                } else {
+                    tbody.innerHTML = data.services.map(s => `
+                        <tr>
+                            <td><b>${s.ip}</b></td>
+                            <td>${s.port}</td>
+                            <td>${s.title}</td>
+                            <td><a href="/address/${s.ip}:${s.port}" target="_blank">Open Proxy (/address/${s.ip}:${s.port})</a></td>
+                        </tr>
+                    `).join('');
+                }
+            } catch(e) {
+                msg.innerText = "Scan failed.";
+                tbody.innerHTML = `<tr><td colspan="4" style="color: #da3633;">Error running scan.</td></tr>`;
+            }
+            btn.disabled = false;
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/finder', methods=['GET'])
+def finder_page():
+    return render_template_string(FINDER_DASHBOARD_HTML)
+
+@app.route('/finder/scan', methods=['GET'])
+def finder_scan_api():
+    discovered = []
+    targets = ["127.0.0.1", "localhost", "192.168.2.143", "192.168.2.91", "192.168.2.134"]
+    
+    # Add gateway or local subnet range scan if desired
+    # We use ThreadPoolExecutor for fast concurrent scanning
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = []
+        for ip in targets:
+            for port in COMMON_PORTS:
+                futures.append(executor.submit(scan_single_target, ip, port))
+        
+        for future in futures:
+            res = future.result()
+            if res:
+                # Deduplicate
+                if not any(d['ip'] == res['ip'] and d['port'] == res['port'] for d in discovered):
+                    discovered.append(res)
+                    
+    return jsonify({"services": discovered})
 
 # ==========================================
 # MODULE 6: DWS Compute Engine (Unload -> Process -> Return)
