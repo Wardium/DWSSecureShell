@@ -443,27 +443,41 @@ def handle_stream_keypress(data):
             pass
 
 # ==========================================
-# MODULE 7: LAN & Docker Port Finder
+# MODULE 7: Comprehensive LAN & Local Port Finder
 # ==========================================
 import socket
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-COMMON_PORTS = [80, 443, 3000, 5000, 5050, 8000, 8080, 8123, 8989, 9000, 9090, 6881]
+def get_active_local_ports():
+    """Queries the OS directly to grab every port currently bound and listening on localhost/0.0.0.0"""
+    active_ports = set()
+    try:
+        # Run ss / netstat to find local listening ports instantly
+        cmd = ["ss", "-tlnp"] if shutil.which("ss") else ["netstat", "-an"]
+        output = subprocess.check_output(cmd, universal_newlines=True, timeout=2)
+        for line in output.splitlines():
+            match = re.search(r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|localhost):(\d+)', line)
+            if match:
+                active_ports.add(int(match.group(1)))
+    except Exception:
+        # Fallback if command fails
+        pass
+    return active_ports
 
 def scan_single_target(ip, port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.3)
+        s.settimeout(0.2)
         result = s.connect_ex((ip, port))
         s.close()
         if result == 0:
-            # Try to grab HTTP title or banner
-            scheme = "https" if port == 443 or port == 8443 else "http"
+            scheme = "https" if port in (443, 8443, 4443) else "http"
             url = f"{scheme}://{ip}:{port}"
-            title = "Active Service"
+            title = f"Service on {port}"
             try:
-                resp = requests.get(url, timeout=0.8, verify=False)
-                if resp.status_code < 400:
+                resp = requests.get(url, timeout=0.5, verify=False)
+                if resp.status_code < 500:
                     match = re.search(r'<title>(.*?)</title>', resp.text, re.IGNORECASE)
                     if match:
                         title = match.group(1).strip()[:40]
@@ -479,7 +493,7 @@ FINDER_DASHBOARD_HTML = """
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>DWS LAN Finder</title>
+    <title>DWS Deep LAN & Port Finder</title>
     <style>
         body { margin: 0; padding: 24px; background: #0d1117; color: #c9d1d9; font-family: monospace; }
         h1 { color: #58a6ff; margin-top: 0; }
@@ -491,24 +505,23 @@ FINDER_DASHBOARD_HTML = """
         th { color: #8b949e; }
         a { color: #58a6ff; text-decoration: none; }
         a:hover { text-decoration: underline; }
-        .badge { padding: 3px 8px; border-radius: 4px; background: #238636; color: #fff; font-size: 12px; }
     </style>
 </head>
 <body>
-    <h1>DWS LAN & Host Finder</h1>
+    <h1>DWS Deep Port & Network Finder</h1>
     <div class="card">
-        <p>Scans local loopback ports, local docker bridges, and active subnet IPs for web services and APIs.</p>
-        <button onclick="startScan()" id="scan-btn">Scan Network Now</button>
+        <p>Performs an OS socket inspection + multi-threaded sweep across ports <b>3000 to 9000</b> and LAN servers (including port 8380).</p>
+        <button onclick="startScan()" id="scan-btn">Run Deep Scan (3000-9000)</button>
         <span id="status-msg" style="margin-left: 15px; color: #8b949e;">Ready.</span>
     </div>
     <div class="card">
-        <h2>Discovered Endpoints</h2>
+        <h2>Discovered Services</h2>
         <table>
             <thead>
-                <tr><th>IP / Host</th><th>Port</th><th>Detected Title / Service</th><th>Proxy Link</th></tr>
+                <tr><th>Host / IP</th><th>Port</th><th>Detected Title / Service</th><th>Proxy Link</th></tr>
             </thead>
             <tbody id="results-table">
-                <tr><td colspan="4" style="color: #8b949e;">Click 'Scan Network Now' to begin.</td></tr>
+                <tr><td colspan="4" style="color: #8b949e;">Click 'Run Deep Scan' to begin.</td></tr>
             </tbody>
         </table>
     </div>
@@ -518,28 +531,32 @@ FINDER_DASHBOARD_HTML = """
             const msg = document.getElementById('status-msg');
             const tbody = document.getElementById('results-table');
             btn.disabled = true;
-            msg.innerText = "Scanning network ports and hosts...";
-            tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Scan in progress... Please wait.</td></tr>`;
+            msg.innerText = "Scanning all ports from 3000 to 9000... (this takes a couple seconds)";
+            tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Deep scanning in progress...</td></tr>`;
             
             try {
                 const res = await fetch('/finder/scan');
                 const data = await res.json();
-                msg.innerText = `Scan complete. Found ${data.services.length} active service(s).`;
+                msg.innerText = `Scan complete. Found ${data.services.length} active endpoint(s).`;
                 if(data.services.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4">No services discovered.</td></tr>`;
                 } else {
                     tbody.innerHTML = data.services.map(s => `
                         <tr>
                             <td><b>${s.ip}</b></td>
-                            <td>${s.port}</td>
+                            <td><b>${s.port}</b></td>
                             <td>${s.title}</td>
-                            <td><a href="/address/${s.ip}:${s.port}" target="_blank">Open Proxy (/address/${s.ip}:${s.port})</a></td>
+                            <td>
+                                ${s.ip === '127.0.0.1' || s.ip === 'localhost' ? 
+                                  `<a href="/port/${s.port}" target="_blank">Open Port Proxy (/port/${s.port})</a>` : 
+                                  `<a href="/address/${s.ip}:${s.port}" target="_blank">Open Address Proxy (/address/${s.ip}:${s.port})</a>`}
+                            </td>
                         </tr>
                     `).join('');
                 }
             } catch(e) {
                 msg.innerText = "Scan failed.";
-                tbody.innerHTML = `<tr><td colspan="4" style="color: #da3633;">Error running scan.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="color: #da3633;">Error running deep scan.</td></tr>`;
             }
             btn.disabled = false;
         }
@@ -555,23 +572,32 @@ def finder_page():
 @app.route('/finder/scan', methods=['GET'])
 def finder_scan_api():
     discovered = []
-    targets = ["127.0.0.1", "localhost", "192.168.2.143", "192.168.2.91", "192.168.2.134"]
     
-    # Add gateway or local subnet range scan if desired
-    # We use ThreadPoolExecutor for fast concurrent scanning
-    with ThreadPoolExecutor(max_workers=30) as executor:
+    # 1. Grab active ports straight from OS listening sockets (instantly finds 8380, etc.)
+    active_local_ports = get_active_local_ports()
+    
+    # Add common defaults + full range 3000-9000
+    ports_to_scan = sorted(list(active_local_ports.union(set(range(3000, 9001)))))
+    
+    targets = ["127.0.0.1", "192.168.2.143", "192.168.2.91", "192.168.2.134"]
+    
+    # High-concurrency pool so scanning 6,000+ ports across local/LAN takes less than 2 seconds
+    with ThreadPoolExecutor(max_workers=100) as executor:
         futures = []
         for ip in targets:
-            for port in COMMON_PORTS:
+            # For local machine, scan the full active + 3000-9000 range. For remote LAN nodes, scan common/likely ports to keep it fast.
+            node_ports = ports_to_scan if ip == "127.0.0.1" else [80, 443, 3000, 5000, 5050, 8000, 8080, 8380, 8989, 9000]
+            for port in node_ports:
                 futures.append(executor.submit(scan_single_target, ip, port))
         
         for future in futures:
             res = future.result()
             if res:
-                # Deduplicate
                 if not any(d['ip'] == res['ip'] and d['port'] == res['port'] for d in discovered):
                     discovered.append(res)
                     
+    # Sort results by port for easy reading
+    discovered.sort(key=lambda x: (x['ip'], x['port']))
     return jsonify({"services": discovered})
 
 # ==========================================
