@@ -274,7 +274,6 @@ def remote_http_proxy(host_port, subpath=""):
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
 
-
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -284,8 +283,12 @@ def remote_https_proxy(host_port, subpath=""):
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
         
     try:
-        if ':' in host_port:
+        # FIXED: Use rfind/rsplit correctly and handle IPv6 brackets if present
+        if host_port.startswith('['):
             host, port_str = host_port.rsplit(':', 1)
+            port = int(port_str.strip(']'))
+        elif host_port.count(':') == 1:
+            host, port_str = host_port.split(':')
             port = int(port_str)
         else:
             host, port = host_port, 443
@@ -443,25 +446,42 @@ def handle_stream_keypress(data):
             pass
 
 # ==========================================
-# MODULE 7: Comprehensive LAN & Local Port Finder
+# MODULE 7: Comprehensive LAN, Docker & Port Finder
 # ==========================================
 import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
+def get_docker_bound_ports():
+    """Queries Docker daemon directly to find all published ports across all containers."""
+    docker_ports = set()
+    try:
+        if shutil.which("docker"):
+            cmd = ["docker", "ps", "--format", "{{.Ports}}"]
+            output = subprocess.check_output(cmd, universal_newlines=True, timeout=2)
+            for line in output.splitlines():
+                # Matches patterns like 0.0.0.0:8380->80/tcp or :::10444->443/tcp
+                matches = re.findall(r'(?:->|:)(\d+)->', line)
+                for p in matches:
+                    docker_ports.add(int(p))
+                # Also catch standalone published ports
+                standalone = re.findall(r'(\d+):\d+/tcp', line)
+                for p in standalone:
+                    docker_ports.add(int(p))
+    except Exception:
+        pass
+    return docker_ports
+
 def get_active_local_ports():
-    """Queries the OS directly to grab every port currently bound and listening on localhost/0.0.0.0"""
     active_ports = set()
     try:
-        # Run ss / netstat to find local listening ports instantly
         cmd = ["ss", "-tlnp"] if shutil.which("ss") else ["netstat", "-an"]
         output = subprocess.check_output(cmd, universal_newlines=True, timeout=2)
         for line in output.splitlines():
-            match = re.search(r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|localhost):(\d+)', line)
+            match = re.search(r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|localhost|[\d\.]+):(\d+)', line)
             if match:
                 active_ports.add(int(match.group(1)))
     except Exception:
-        # Fallback if command fails
         pass
     return active_ports
 
@@ -472,18 +492,22 @@ def scan_single_target(ip, port):
         result = s.connect_ex((ip, port))
         s.close()
         if result == 0:
-            scheme = "https" if port in (443, 8443, 4443) else "http"
+            # Check if this port is known to be HTTPS
+            is_https = port in (443, 8443, 10444, 4443) or port > 10000
+            scheme = "https" if is_https else "http"
             url = f"{scheme}://{ip}:{port}"
             title = f"Service on {port}"
             try:
-                resp = requests.get(url, timeout=0.5, verify=False)
+                resp = requests.get(url, timeout=0.6, verify=False)
                 if resp.status_code < 500:
                     match = re.search(r'<title>(.*?)</title>', resp.text, re.IGNORECASE)
                     if match:
                         title = match.group(1).strip()[:40]
             except Exception:
-                pass
-            return {"ip": ip, "port": port, "url": url, "title": title, "status": "Online"}
+                # If HTTPS probe failed with cert/ssl error, mark it online anyway since port is open
+                title = "Secure Service (HTTPS)" if is_https else title
+                
+            return {"ip": ip, "port": port, "url": url, "title": title, "status": "Online", "is_https": is_https}
     except Exception:
         pass
     return None
@@ -510,8 +534,8 @@ FINDER_DASHBOARD_HTML = """
 <body>
     <h1>DWS Deep Port & Network Finder</h1>
     <div class="card">
-        <p>Performs an OS socket inspection + multi-threaded sweep across ports <b>3000 to 9000</b> and LAN servers (including port 8380).</p>
-        <button onclick="startScan()" id="scan-btn">Run Deep Scan (3000-9000)</button>
+        <p>Scans OS listeners, Docker container bindings, ports <b>8380, 10444</b>, and range 3000-9000.</p>
+        <button onclick="startScan()" id="scan-btn">Run Deep Scan</button>
         <span id="status-msg" style="margin-left: 15px; color: #8b949e;">Ready.</span>
     </div>
     <div class="card">
@@ -531,7 +555,7 @@ FINDER_DASHBOARD_HTML = """
             const msg = document.getElementById('status-msg');
             const tbody = document.getElementById('results-table');
             btn.disabled = true;
-            msg.innerText = "Scanning all ports from 3000 to 9000... (this takes a couple seconds)";
+            msg.innerText = "Scanning Docker containers, OS ports, and custom ranges...";
             tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Deep scanning in progress...</td></tr>`;
             
             try {
@@ -541,18 +565,24 @@ FINDER_DASHBOARD_HTML = """
                 if(data.services.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4">No services discovered.</td></tr>`;
                 } else {
-                    tbody.innerHTML = data.services.map(s => `
-                        <tr>
-                            <td><b>${s.ip}</b></td>
-                            <td><b>${s.port}</b></td>
-                            <td>${s.title}</td>
-                            <td>
-                                ${s.ip === '127.0.0.1' || s.ip === 'localhost' ? 
-                                  `<a href="/port/${s.port}" target="_blank">Open Port Proxy (/port/${s.port})</a>` : 
-                                  `<a href="/address/${s.ip}:${s.port}" target="_blank">Open Address Proxy (/address/${s.ip}:${s.port})</a>`}
-                            </td>
-                        </tr>
-                    `).join('');
+                    tbody.innerHTML = data.services.map(s => {
+                        let link = "";
+                        if (s.ip === '127.0.0.1' || s.ip === 'localhost') {
+                            link = s.is_https ? `<a href="/https/localhost:${s.port}" target="_blank">Open HTTPS Proxy (/https/localhost:${s.port})</a>` :
+                                               `<a href="/port/${s.port}" target="_blank">Open Port Proxy (/port/${s.port})</a>`;
+                        } else {
+                            link = s.is_https ? `<a href="/https/${s.ip}:${s.port}" target="_blank">Open HTTPS Proxy (/https/${s.ip}:${s.port})</a>` :
+                                               `<a href="/address/${s.ip}:${s.port}" target="_blank">Open Address Proxy (/address/${s.ip}:${s.port})</a>`;
+                        }
+                        return `
+                            <tr>
+                                <td><b>${s.ip}</b></td>
+                                <td><b>${s.port} ${s.is_https ? '(HTTPS)' : ''}</b></td>
+                                <td>${s.title}</td>
+                                <td>${link}</td>
+                            </tr>
+                        `;
+                    }).join('');
                 }
             } catch(e) {
                 msg.innerText = "Scan failed.";
@@ -573,20 +603,17 @@ def finder_page():
 def finder_scan_api():
     discovered = []
     
-    # 1. Grab active ports straight from OS listening sockets (instantly finds 8380, etc.)
-    active_local_ports = get_active_local_ports()
+    # Gather ports from OS sockets, Docker containers, and explicitly add user-noted ports (8380, 10444)
+    active_ports = get_active_local_ports().union(get_docker_bound_ports())
+    active_ports.update({8380, 10444})
     
-    # Add common defaults + full range 3000-9000
-    ports_to_scan = sorted(list(active_local_ports.union(set(range(3000, 9001)))))
-    
+    ports_to_scan = sorted(list(active_ports.union(set(range(3000, 9001)))))
     targets = ["127.0.0.1", "192.168.2.143", "192.168.2.91", "192.168.2.134"]
     
-    # High-concurrency pool so scanning 6,000+ ports across local/LAN takes less than 2 seconds
     with ThreadPoolExecutor(max_workers=100) as executor:
         futures = []
         for ip in targets:
-            # For local machine, scan the full active + 3000-9000 range. For remote LAN nodes, scan common/likely ports to keep it fast.
-            node_ports = ports_to_scan if ip == "127.0.0.1" else [80, 443, 3000, 5000, 5050, 8000, 8080, 8380, 8989, 9000]
+            node_ports = ports_to_scan if ip == "127.0.0.1" else [80, 443, 3000, 5000, 5050, 8000, 8080, 8380, 8989, 9000, 10444]
             for port in node_ports:
                 futures.append(executor.submit(scan_single_target, ip, port))
         
@@ -596,7 +623,6 @@ def finder_scan_api():
                 if not any(d['ip'] == res['ip'] and d['port'] == res['port'] for d in discovered):
                     discovered.append(res)
                     
-    # Sort results by port for easy reading
     discovered.sort(key=lambda x: (x['ip'], x['port']))
     return jsonify({"services": discovered})
 
