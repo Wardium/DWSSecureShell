@@ -252,7 +252,7 @@ def local_port_proxy(target_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
         qs = request.query_string.decode('utf-8')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-    return perform_proxy('http', '127.0.0.1', target_port, subpath)
+    return perform_proxy('http', '0.0.0.0', target_port, subpath)
 
 
 @app.route('/address/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -359,7 +359,7 @@ def stream_route(proxy_type, target):
     if not SELENIUM_AVAILABLE:
         return "<h3>Selenium is missing!</h3><p>To use the Stream feature, please run <code>pip install selenium</code> on the host machine.</p>", 500
         
-    if proxy_type == 'port': target_url = f"http://127.0.0.1:{target}"
+    if proxy_type == 'port': target_url = f"http://0.0.0.0:{target}"
     elif proxy_type == 'address': target_url = f"http://{target}"
     elif proxy_type == 'https': target_url = f"https://{target}"
     else: return "Invalid stream type", 400
