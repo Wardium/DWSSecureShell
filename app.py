@@ -2,9 +2,10 @@
 import eventlet
 eventlet.monkey_patch()
 
-from flask import Flask, render_template, render_template_string, request, jsonify, Response, redirect, send_file
+from flask import Flask, render_template, render_template_string, request, jsonify, Response, redirect, send_file, stream_with_context
 from flask_socketio import SocketIO
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 import paramiko
 import logging
 import sys
@@ -21,11 +22,14 @@ import base64
 import signal
 import tempfile
 import io
+import socket
+import ssl
+import traceback
 
 # Suppress insecure request warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Safely import Selenium for the new Stream feature
+# Safely import Selenium for the Stream feature
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -34,8 +38,8 @@ except ImportError:
     SELENIUM_AVAILABLE = False
 
 logging.basicConfig(
-    stream=sys.stdout, 
-    level=logging.INFO, 
+    stream=sys.stdout,
+    level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -44,9 +48,10 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- GLOBAL VARIABLES ---
-active_sessions = {}
+DWS_LISTEN_PORT = 5000
+active_sessions = {}      # Stores {"ssh": ssh_client, "channel": ssh_channel} mapped by request.sid
 enforced_devices = {}
-stream_browsers = {}  # Tracks headless browsers for the Stream feature
+stream_browsers = {}      # Tracks headless browsers for the Stream feature
 
 # --- MODULE 6: COMPUTE ENGINE GLOBALS ---
 COMPUTE_RAMDISK = "/dev/shm/dws_compute" if os.path.exists("/dev/shm") else os.path.join(tempfile.gettempdir(), "dws_compute")
@@ -58,6 +63,29 @@ node_active_counts = {"local": 0, "1": 0, "2": 0, "3": 0}
 MAX_JOB_HISTORY = 100     # Prevent unbounded memory growth
 
 # ==========================================
+# GLOBAL CRASH PROTECTION & ERROR HANDLERS
+# ==========================================
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    logging.error(f"Unhandled Flask Exception on {request.path}: {error}\n{traceback.format_exc()}")
+    if request.path.startswith(('/compute/', '/finder/scan')):
+        return jsonify({"error": "Internal Server Error", "details": str(error)}), 500
+    return Response(
+        f"""<!DOCTYPE html><html><body style="background:#0d1117;color:#c9d1d9;font-family:monospace;padding:24px;">
+        <h2 style="color:#ff7b72;">DWS Guard // Request Handled Safely</h2>
+        <p>The target service or route encountered an error, but DWS prevented a crash.</p>
+        <pre style="background:#161b22;padding:12px;border:1px solid #30363d;border-radius:6px;color:#ffa657;">{str(error)}</pre>
+        <a href="/finder" style="color:#58a6ff;">&larr; Return to DWS Finder</a>
+        </body></html>""",
+        status=502,
+        mimetype='text/html'
+    )
+
+@socketio.on_error_default
+def default_socket_error_handler(e):
+    logging.error(f"Unhandled SocketIO Exception: {e}\n{traceback.format_exc()}")
+
+# ==========================================
 # MODULE 1: DWS Server Shell
 # ==========================================
 SERVERS = {
@@ -65,9 +93,6 @@ SERVERS = {
     "2": {"host": "192.168.2.91", "user": "dylanwardstudios", "password": "weqr1234"},
     "3": {"host": "192.168.2.134", "user": "dylan", "password": "sIjkew-1qixwe-sogcog"}
 }
-
-# Stores {"ssh": ssh_client, "channel": ssh_channel} mapped by request.sid
-active_sessions = {}
 
 @app.route('/shell/<server_id>')
 def shell(server_id):
@@ -78,26 +103,24 @@ def shell(server_id):
 
 @socketio.on('connect_ssh')
 def handle_ssh_connection(data):
-    server_id = data.get('server_id')
+    data = data or {}
+    server_id = str(data.get('server_id', ''))
     if server_id not in SERVERS:
         return
 
-    # Grab initial terminal dimensions sent from the browser (fallback to 80x24)
-    cols = data.get('cols', 80)
-    rows = data.get('rows', 24)
+    cols = int(data.get('cols', 80))
+    rows = int(data.get('rows', 24))
 
     server = SERVERS[server_id]
-    client_sid = request.sid  
-    
+    client_sid = request.sid
+
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
         ssh.connect(server['host'], username=server['user'], password=server['password'], timeout=5)
-        
-        # Invoke shell with xterm-256color for full ANSI color support and exact initial dimensions
         channel = ssh.invoke_shell(term='xterm-256color', width=cols, height=rows)
-        
+
         active_sessions[client_sid] = {
             'ssh': ssh,
             'channel': channel
@@ -107,11 +130,10 @@ def handle_ssh_connection(data):
         def listen_to_ssh(sid, chan):
             while not chan.closed:
                 try:
-                    data = chan.recv(4096)
-                    if not data:
+                    chunk = chan.recv(4096)
+                    if not chunk:
                         break
-                    # errors='replace' prevents crashes if a multi-byte UTF-8 character splits across chunks
-                    output = data.decode('utf-8', errors='replace')
+                    output = chunk.decode('utf-8', errors='replace')
                     socketio.emit('ssh_output', {'output': output}, to=sid)
                 except Exception:
                     break
@@ -124,21 +146,23 @@ def handle_ssh_connection(data):
 @socketio.on('ssh_input')
 def handle_input(input_data):
     session = active_sessions.get(request.sid)
-    if session:
+    if session and isinstance(input_data, dict):
         channel = session['channel']
         if not channel.closed:
-            channel.send(input_data.get('input', ''))
+            try:
+                channel.send(input_data.get('input', ''))
+            except Exception as e:
+                logging.error(f"SSH send error: {e}")
 
 @socketio.on('ssh_resize')
 def handle_resize(data):
     session = active_sessions.get(request.sid)
-    if session:
+    if session and isinstance(data, dict):
         channel = session['channel']
         if not channel.closed:
-            cols = data.get('cols', 80)
-            rows = data.get('rows', 24)
+            cols = int(data.get('cols', 80))
+            rows = int(data.get('rows', 24))
             try:
-                # Dynamically resize the Linux PTY so line-wrapping and nano/htop/vim scale properly
                 channel.resize_pty(width=cols, height=rows)
             except Exception as e:
                 logging.error(f"Failed to resize PTY: {e}")
@@ -152,97 +176,197 @@ def handle_disconnect():
             active_sessions[session_id]['ssh'].close()
         except Exception:
             pass
-        del active_sessions[session_id]
-        
-    # Cleanup orphaned streams
+        active_sessions.pop(session_id, None)
+
     if session_id in stream_browsers:
         try:
             stream_browsers[session_id].quit()
         except Exception:
             pass
-        del stream_browsers[session_id]
+        stream_browsers.pop(session_id, None)
 
 # ==========================================
-# MODULE 4: Simple Reverse Proxy (Reverted)
+# MODULE 4: Hardened Reverse Proxy
 # ==========================================
-def perform_proxy(scheme, target_host, target_port, subpath):
-    subpath = subpath.lstrip('/')
-    target_url = f"{scheme}://{target_host}:{target_port}/{subpath}"
-    
-    if request.query_string:
-        target_url = f"{target_url}?{request.query_string.decode('utf-8')}"
-        
+# Complete list of PEP 3333 WSGI hop-by-hop headers that crash Eventlet if passed through
+HOP_BY_HOP_HEADERS = {
+    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+    'te', 'trailers', 'transfer-encoding', 'upgrade',
+    'content-encoding', 'content-length', 'alt-svc'
+}
+
+def get_local_ips():
+    """Returns all IP addresses belonging to this host to prevent self-proxy infinite loops."""
+    ips = {'127.0.0.1', 'localhost', '0.0.0.0', '::1'}
     try:
-        # Spoof inbound headers so the target app accepts the request
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    return ips
+
+LOCAL_HOST_IPS = get_local_ips()
+
+def parse_host_port(host_port_str, default_port):
+    """Safely parses host:port strings including IPv6 brackets."""
+    host_port_str = host_port_str.strip()
+    if host_port_str.startswith('['):
+        if ']:' in host_port_str:
+            host, port_s = host_port_str.rsplit(']:', 1)
+            return host + ']', int(port_s)
+        return host_port_str, default_port
+    if ':' in host_port_str:
+        host, port_s = host_port_str.rsplit(':', 1)
+        return host, int(port_s)
+    return host_port_str, default_port
+
+def perform_proxy(scheme, target_host, target_port, subpath):
+    # Prevent infinite self-proxy recursion if user clicks port 5000
+    if int(target_port) == DWS_LISTEN_PORT and target_host in LOCAL_HOST_IPS:
+        return jsonify({
+            "error": "Self-Proxy Blocked",
+            "details": f"Port {DWS_LISTEN_PORT} is the DWS server itself. Proxying it into itself is blocked to prevent an infinite loop."
+        }), 400
+
+    subpath = subpath.lstrip('/')
+    qs = f"?{request.query_string.decode('utf-8', errors='replace')}" if request.query_string else ""
+
+    def send_upstream(use_scheme):
+        url = f"{use_scheme}://{target_host}:{target_port}/{subpath}{qs}"
         req_headers = {}
         for key, value in request.headers:
             k_lower = key.lower()
-            if k_lower == 'host':
+            # Strip host, length, and encoding so requests/urllib3 handles decompression cleanly
+            if k_lower in ('host', 'content-length', 'transfer-encoding', 'accept-encoding', 'connection'):
                 continue
             elif k_lower == 'origin':
-                req_headers[key] = f"{scheme}://{target_host}:{target_port}"
+                req_headers[key] = f"{use_scheme}://{target_host}:{target_port}"
             elif k_lower == 'referer':
-                req_headers[key] = f"{scheme}://{target_host}:{target_port}/"
+                req_headers[key] = f"{use_scheme}://{target_host}:{target_port}/"
             else:
                 req_headers[key] = value
-        
-        proxied_response = requests.request(
+
+        # CRITICAL FIX for Port 8380 garbage: Force gzip/deflate only (blocks Brotli 'br' & 'zstd' raw binary dumps)
+        req_headers['Accept-Encoding'] = 'gzip, deflate'
+
+        body = request.get_data() if request.method not in ('GET', 'HEAD', 'OPTIONS') else None
+
+        return requests.request(
             method=request.method,
-            url=target_url,
+            url=url,
             headers=req_headers,
-            data=request.get_data(),
+            data=body,
             cookies=request.cookies,
             allow_redirects=False,
             stream=True,
-            timeout=15,
-            verify=False 
+            timeout=(5, 20),
+            verify=False
         )
-        
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        resp_headers = []
-        
-        if target_host == '127.0.0.1' and scheme == 'http':
+
+    try:
+        try:
+            proxied_response = send_upstream(scheme)
+            # Auto-fallback: If an HTTPS port was accessed via HTTP (Nginx/Apache returns 400 plain HTTP sent to HTTPS port)
+            if scheme == 'http' and proxied_response.status_code == 400:
+                peek = proxied_response.content[:256].decode('utf-8', errors='ignore')
+                if 'HTTPS' in peek or 'SSL' in peek:
+                    proxied_response.close()
+                    scheme = 'https'
+                    proxied_response = send_upstream('https')
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError):
+            # If HTTP connection reset (common when hitting a TLS port with plain HTTP), try HTTPS automatically
+            if scheme == 'http':
+                scheme = 'https'
+                proxied_response = send_upstream('https')
+            else:
+                raise
+
+        if target_host in ('127.0.0.1', 'localhost') and scheme == 'http':
             base_proxy_url = f"/port/{target_port}"
         elif scheme == 'https':
             base_proxy_url = f"/https/{target_host}:{target_port}"
         else:
             base_proxy_url = f"/address/{target_host}:{target_port}"
-            
-        # Rewrite Redirects and Cookies
-        for key, value in proxied_response.raw.headers.items():
-            if key.lower() not in excluded_headers:
-                if key.lower() == 'location':
-                    if value.startswith('/'):
-                        value = base_proxy_url + value
-                    else:
-                        value = value.replace(f"{scheme}://{target_host}:{target_port}", base_proxy_url)
-                        value = value.replace(f"{scheme}://{target_host}", base_proxy_url)
-                
-                elif key.lower() == 'set-cookie':
-                    value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.IGNORECASE)
-                    value = re.sub(r';\s*Path=[^;]+', '; Path=/', value, flags=re.IGNORECASE)
 
-                resp_headers.append((key, value))
-        
-        # Create the response object
+        resp_headers = []
+        # Identify dynamicConnection-specified hop-by-hop headers too
+        conn_header = proxied_response.headers.get('Connection', '')
+        dynamic_hop_headers = {h.strip().lower() for h in conn_header.split(',') if h.strip()}
+
+        for key, value in proxied_response.raw.headers.items():
+            k_lower = key.lower()
+            if k_lower in HOP_BY_HOP_HEADERS or k_lower in dynamic_hop_headers:
+                continue
+
+            # Ensure header values do not contain control characters that crash WSGI
+            clean_val = str(value).replace('\r', '').replace('\n', ' ')
+
+            if k_lower == 'location':
+                if clean_val.startswith('/'):
+                    clean_val = base_proxy_url + clean_val
+                else:
+                    clean_val = clean_val.replace(f"http://{target_host}:{target_port}", base_proxy_url)
+                    clean_val = clean_val.replace(f"https://{target_host}:{target_port}", base_proxy_url)
+                    clean_val = clean_val.replace(f"{scheme}://{target_host}", base_proxy_url)
+            elif k_lower == 'set-cookie':
+                clean_val = re.sub(r';\s*Domain=[^;]+', '', clean_val, flags=re.IGNORECASE)
+                clean_val = re.sub(r';\s*Path=[^;]+', '; Path=/', clean_val, flags=re.IGNORECASE)
+                clean_val = re.sub(r';\s*SameSite=[^;]+', '', clean_val, flags=re.IGNORECASE)
+
+            resp_headers.append((key, clean_val))
+
+        # CRITICAL FIX for Port 81 crash: Wrap generator in try/except/finally so mid-stream drops never crash Eventlet
+        @stream_with_context
+        def generate_safe_stream():
+            try:
+                for chunk in proxied_response.iter_content(chunk_size=16 * 1024):
+                    if chunk:
+                        yield chunk
+            except Exception as stream_err:
+                logging.warning(f"Stream interrupted from {target_host}:{target_port}: {stream_err}")
+            finally:
+                try:
+                    proxied_response.close()
+                except Exception:
+                    pass
+
         response = Response(
-            proxied_response.iter_content(chunk_size=10*1024), 
-            proxied_response.status_code, 
-            resp_headers
+            generate_safe_stream(),
+            status=proxied_response.status_code,
+            headers=resp_headers
         )
-        
+
         # STICKY SESSION: Remember the target so SPA client-side routing doesn't break
         target_identifier = f"{scheme}://{target_host}:{target_port}"
         response.set_cookie('dws_active_target', target_identifier, path='/')
-        
+
         return response
 
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Connection Refused", "details": f"Target {target_host}:{target_port} inaccessible."}), 503
+    except requests.exceptions.ConnectionError as e:
+        return jsonify({
+            "error": "Connection Refused",
+            "details": f"Target {target_host}:{target_port} is not listening or refused the connection.",
+            "raw": str(e)
+        }), 503
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Gateway Timeout", "details": f"Target {target_host}:{target_port} timed out."}), 504
+        return jsonify({
+            "error": "Gateway Timeout",
+            "details": f"Target {target_host}:{target_port} timed out."
+        }), 504
     except Exception as e:
-        return jsonify({"error": "Internal Proxy Error", "details": str(e)}), 500
+        logging.error(f"Proxy error for {target_host}:{target_port}: {e}\n{traceback.format_exc()}")
+        return jsonify({
+            "error": "Internal Proxy Error",
+            "details": str(e)
+        }), 502
 
 
 @app.route('/port/<int:target_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
@@ -250,9 +374,8 @@ def perform_proxy(scheme, target_host, target_port, subpath):
 @app.route('/port/<int:target_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def local_port_proxy(target_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
-        qs = request.query_string.decode('utf-8')
+        qs = request.query_string.decode('utf-8', errors='replace')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-    # FIXED: Use 127.0.0.1 instead of 0.0.0.0 so Docker container loopback bindings accept connections
     return perform_proxy('http', '127.0.0.1', target_port, subpath)
 
 
@@ -261,40 +384,28 @@ def local_port_proxy(target_port, subpath=""):
 @app.route('/address/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_http_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
-        qs = request.query_string.decode('utf-8')
+        qs = request.query_string.decode('utf-8', errors='replace')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-        
     try:
-        if ':' in host_port:
-            host, port_str = host_port.rsplit(':', 1)
-            port = int(port_str)
-        else:
-            host, port = host_port, 80
+        host, port = parse_host_port(host_port, 80)
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('http', host, port, subpath)
+
 
 @app.route('/https/<host_port>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 @app.route('/https/<host_port>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def remote_https_proxy(host_port, subpath=""):
     if not subpath and not request.path.endswith('/'):
-        qs = request.query_string.decode('utf-8')
+        qs = request.query_string.decode('utf-8', errors='replace')
         return redirect(f"{request.path}/" + (f"?{qs}" if qs else ""))
-        
     try:
-        # FIXED: Use rfind/rsplit correctly and handle IPv6 brackets if present
-        if host_port.startswith('['):
-            host, port_str = host_port.rsplit(':', 1)
-            port = int(port_str.strip(']'))
-        elif host_port.count(':') == 1:
-            host, port_str = host_port.split(':')
-            port = int(port_str)
-        else:
-            host, port = host_port, 443
+        host, port = parse_host_port(host_port, 443)
     except ValueError:
         return jsonify({"error": "Invalid Port"}), 400
     return perform_proxy('https', host, port, subpath)
+
 
 # ==========================================
 # MODULE 5: Remote Browser Isolation (Stream)
@@ -308,7 +419,6 @@ STREAM_HTML = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; width: 100vw; overflow: hidden; font-family: sans-serif; color: white; }
-        /* Using contain ensures the aspect ratio stays perfect so the coordinates don't distort */
         img { width: 100vw; height: 100vh; object-fit: contain; cursor: crosshair; }
         #loading { position: absolute; font-size: 20px; text-shadow: 1px 1px 2px black; }
     </style>
@@ -323,7 +433,7 @@ STREAM_HTML = """
         const loading = document.getElementById('loading');
 
         socket.on('connect', () => {
-            socket.emit('start_stream', { 
+            socket.emit('start_stream', {
                 url: "{{ target_url }}",
                 width: window.innerWidth,
                 height: window.innerHeight
@@ -332,18 +442,17 @@ STREAM_HTML = """
 
         socket.on('stream_frame', function(data) {
             if (loading) loading.style.display = 'none';
-            // We are now receiving highly compressed JPEGs straight from Chrome
             img.src = "data:image/jpeg;base64," + data.image;
         });
 
         img.addEventListener('click', function(e) {
+            if (!img.naturalWidth || !img.naturalHeight) return;
             const rect = img.getBoundingClientRect();
-            // Calculate exact coordinates relative to the actual image size inside the letterbox
             const scaleX = img.naturalWidth / rect.width;
             const scaleY = img.naturalHeight / rect.height;
             const clickX = Math.round((e.clientX - rect.left) * scaleX);
             const clickY = Math.round((e.clientY - rect.top) * scaleY);
-            
+
             socket.emit('stream_click', { x: clickX, y: clickY });
         });
 
@@ -362,32 +471,38 @@ STREAM_HTML = """
 def stream_route(proxy_type, target):
     if not SELENIUM_AVAILABLE:
         return "<h3>Selenium is missing!</h3><p>To use the Stream feature, please run <code>pip install selenium</code> on the host machine.</p>", 500
-        
-    if proxy_type == 'port': target_url = f"http://0.0.0.0:{target}"
-    elif proxy_type == 'address': target_url = f"http://{target}"
-    elif proxy_type == 'https': target_url = f"https://{target}"
-    else: return "Invalid stream type", 400
-        
+
+    # FIXED: Use 127.0.0.1 instead of 0.0.0.0 so headless Chrome can reach local ports reliably
+    if proxy_type == 'port':
+        target_url = f"http://127.0.0.1:{target}"
+    elif proxy_type == 'address':
+        target_url = f"http://{target}"
+    elif proxy_type == 'https':
+        target_url = f"https://{target}"
+    else:
+        return "Invalid stream type", 400
+
     return render_template_string(STREAM_HTML, target_url=target_url)
 
 @socketio.on('start_stream')
 def handle_start_stream(data):
-    if not SELENIUM_AVAILABLE: return
-    
-    url = data['url']
+    if not SELENIUM_AVAILABLE or not isinstance(data, dict):
+        return
+
+    url = data.get('url', '')
     width = int(data.get('width', 1920))
     height = int(data.get('height', 1080))
     client_sid = request.sid
-    
+
     logging.info(f"Booting optimized {width}x{height} stream for {url}...")
-    
+
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument(f"--window-size={width},{height}")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--ignore-certificate-errors")
-    
+
     try:
         driver = webdriver.Chrome(options=chrome_options)
         driver.get(url)
@@ -395,33 +510,28 @@ def handle_start_stream(data):
     except Exception as e:
         logging.error(f"Failed to start headless browser: {e}")
         return
-        
+
     def stream_loop():
         while client_sid in stream_browsers:
             try:
-                # OPTIMIZATION: Shift processing to Chrome. Ask for a 60% quality JPEG instead of a lossless PNG.
-                # This drops the file size from ~4MB to ~150KB, massively increasing stream speed!
                 res = stream_browsers[client_sid].execute_cdp_cmd('Page.captureScreenshot', {
                     'format': 'jpeg',
                     'quality': 60
                 })
-                
                 socketio.emit('stream_frame', {'image': res['data']}, to=client_sid)
-                eventlet.sleep(0.1) # 10 Frames Per Second
-            except Exception as e:
+                eventlet.sleep(0.1)
+            except Exception:
                 break
-    
+
     socketio.start_background_task(stream_loop)
 
 @socketio.on('stream_click')
 def handle_stream_click(data):
     client_sid = request.sid
-    if client_sid in stream_browsers:
+    if client_sid in stream_browsers and isinstance(data, dict):
         driver = stream_browsers[client_sid]
-        x, y = int(data['x']), int(data['y'])
+        x, y = int(data.get('x', 0)), int(data.get('y', 0))
         try:
-            # FIX: Hardware-level Mouse Clicks via Chrome DevTools Protocol
-            # This completely bypasses React/Vue's fake click blockers
             driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
                 'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1
             })
@@ -434,80 +544,189 @@ def handle_stream_click(data):
 @socketio.on('stream_keypress')
 def handle_stream_keypress(data):
     client_sid = request.sid
-    if client_sid in stream_browsers:
+    if client_sid in stream_browsers and isinstance(data, dict):
         driver = stream_browsers[client_sid]
-        key = data['key']
+        key = data.get('key', '')
         try:
             active = driver.switch_to.active_element
-            if key == 'Enter': active.send_keys('\ue007')
-            elif key == 'Backspace': active.send_keys('\ue003')
-            elif len(key) == 1: active.send_keys(key)
-        except:
+            if key == 'Enter':
+                active.send_keys('\ue007')
+            elif key == 'Backspace':
+                active.send_keys('\ue003')
+            elif len(key) == 1:
+                active.send_keys(key)
+        except Exception:
             pass
 
 # ==========================================
-# MODULE 7: Comprehensive LAN, Docker & Port Finder
+# MODULE 7: Deep LAN, ARP, SSH & Docker Port Finder
 # ==========================================
-import socket
-import subprocess
-from concurrent.futures import ThreadPoolExecutor
+COMMON_LAN_PORTS = [
+    80, 81, 443, 1880, 1984, 2283, 3000, 3001, 32400, 4443, 5000, 5001,
+    5050, 5055, 6767, 7878, 8000, 8006, 8080, 8081, 8090, 8096, 8123,
+    8200, 8380, 8443, 8554, 8686, 8920, 8989, 9000, 9001, 9090, 9091,
+    9117, 9443, 9696, 10000, 10444, 11434, 19999
+]
+
+def parse_ports_from_command_output(output):
+    """Extracts listening TCP ports from ss/netstat/docker output, including *:81 and [::]:8380."""
+    ports = set()
+    for line in output.splitlines():
+        # Match ss/netstat patterns like 0.0.0.0:81, *:8380, [::]:10444, 127.0.0.1:5000
+        for m in re.findall(r'(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]|\*|localhost|[\d\.]+):(\d+)\b', line):
+            p = int(m)
+            if 1 <= p <= 65535:
+                ports.add(p)
+        # Match docker ps patterns like ->80/tcp or 0.0.0.0:8380->
+        for m in re.findall(r':(\d+)->\d+/tcp', line):
+            ports.add(int(m))
+    return ports
 
 def get_docker_bound_ports():
-    """Queries Docker daemon directly to find all published ports across all containers."""
+    """Queries local Docker daemon directly to find all published ports."""
     docker_ports = set()
     try:
         if shutil.which("docker"):
-            cmd = ["docker", "ps", "--format", "{{.Ports}}"]
-            output = subprocess.check_output(cmd, universal_newlines=True, timeout=2)
-            for line in output.splitlines():
-                # Matches patterns like 0.0.0.0:8380->80/tcp or :::10444->443/tcp
-                matches = re.findall(r'(?:->|:)(\d+)->', line)
-                for p in matches:
-                    docker_ports.add(int(p))
-                # Also catch standalone published ports
-                standalone = re.findall(r'(\d+):\d+/tcp', line)
-                for p in standalone:
-                    docker_ports.add(int(p))
+            output = subprocess.check_output(["docker", "ps", "--format", "{{.Ports}}"], universal_newlines=True, timeout=2)
+            docker_ports.update(parse_ports_from_command_output(output))
     except Exception:
         pass
     return docker_ports
 
 def get_active_local_ports():
+    """Finds all active listening TCP ports on the local machine."""
     active_ports = set()
     try:
-        cmd = ["ss", "-tlnp"] if shutil.which("ss") else ["netstat", "-an"]
+        cmd = ["ss", "-tln"] if shutil.which("ss") else ["netstat", "-tln"]
         output = subprocess.check_output(cmd, universal_newlines=True, timeout=2)
-        for line in output.splitlines():
-            match = re.search(r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|localhost|[\d\.]+):(\d+)', line)
-            if match:
-                active_ports.add(int(match.group(1)))
+        active_ports.update(parse_ports_from_command_output(output))
     except Exception:
         pass
     return active_ports
 
+def get_remote_ssh_listening_ports(server_info):
+    """Connects to known SERVERS via SSH and pulls exact listening OS & Docker ports."""
+    ports = set(COMMON_LAN_PORTS)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(server_info["host"], username=server_info["user"], password=server_info["password"], timeout=2.5)
+        _, stdout, _ = ssh.exec_command("ss -tln 2>/dev/null || netstat -tln 2>/dev/null; docker ps --format '{{.Ports}}' 2>/dev/null")
+        out_text = stdout.read().decode('utf-8', errors='ignore')
+        ports.update(parse_ports_from_command_output(out_text))
+    except Exception:
+        pass
+    finally:
+        try:
+            ssh.close()
+        except Exception:
+            pass
+    return sorted(ports)
+
+def discover_lan_hosts(subnet_prefix="192.168.2"):
+    """Discovers active LAN IPs on the subnet using ARP cache + fast parallel probe."""
+    hosts = {"127.0.0.1"}
+    for srv in SERVERS.values():
+        hosts.add(srv["host"])
+
+    # 1. Read OS ARP table (/proc/net/arp and ip neigh) for instant known LAN devices
+    try:
+        if os.path.exists("/proc/net/arp"):
+            with open("/proc/net/arp", "r") as f:
+                for line in f.read().splitlines()[1:]:
+                    parts = line.split()
+                    if parts and parts[0].startswith(subnet_prefix + ".") and parts[2] != "0x0":
+                        hosts.add(parts[0])
+    except Exception:
+        pass
+
+    try:
+        if shutil.which("ip"):
+            arp_out = subprocess.check_output(["ip", "neigh"], universal_newlines=True, timeout=1.5)
+            for m in re.findall(r'(\d+\.\d+\.\d+\.\d+)\s+dev\s+\S+\s+lladdr', arp_out):
+                if m.startswith(subnet_prefix + "."):
+                    hosts.add(m)
+    except Exception:
+        pass
+
+    # 2. Fast TCP sweep across the entire /24 subnet to wake & detect any un-cached servers
+    probe_ports = (80, 81, 443, 22, 5000, 8080, 8380, 9000, 10444)
+
+    def probe_ip(ip_addr):
+        if ip_addr in hosts:
+            return ip_addr
+        for p in probe_ports:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.12)
+            try:
+                res = s.connect_ex((ip_addr, p))
+                if res == 0:
+                    return ip_addr
+            except Exception:
+                pass
+            finally:
+                s.close()
+        return None
+
+    all_subnet_ips = [f"{subnet_prefix}.{i}" for i in range(1, 255)]
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        for found in ex.map(probe_ip, all_subnet_ips):
+            if found:
+                hosts.add(found)
+
+    return sorted(hosts, key=lambda ip: [int(x) for x in ip.split('.')])
+
+def detect_port_protocol_and_title(ip, port):
+    """Probes an open port to accurately detect HTTPS vs HTTP and extract its page title."""
+    if port == DWS_LISTEN_PORT and (ip == "127.0.0.1" or ip in LOCAL_HOST_IPS):
+        return {"ip": ip, "port": port, "url": f"http://{ip}:{port}", "title": "DWS Server (This Host)", "status": "Online", "is_https": False}
+
+    # First check if HTTPS is likely or test TLS handshake quickly
+    likely_https = port in (443, 4443, 8443, 9443, 10444, 8006)
+    schemes_to_try = ["https", "http"] if likely_https else ["http", "https"]
+
+    for scheme in schemes_to_try:
+        url = f"{scheme}://{ip}:{port}"
+        try:
+            resp = requests.get(
+                url,
+                timeout=0.8,
+                verify=False,
+                headers={"Accept-Encoding": "gzip, deflate", "User-Agent": "DWS-Finder/2.0"}
+            )
+            # If plain HTTP was sent to an HTTPS port, Nginx/Apache returns 400 with HTTPS warning
+            if scheme == "http" and resp.status_code == 400 and ("HTTPS" in resp.text[:300] or "SSL" in resp.text[:300]):
+                continue
+
+            is_https = (scheme == "https")
+            title = f"Service on {port}"
+            match = re.search(r'<title[^>]*>(.*?)</title>', resp.text[:4096], re.IGNORECASE | re.DOTALL)
+            if match:
+                clean_title = re.sub(r'\s+', ' ', match.group(1)).strip()
+                if clean_title:
+                    title = clean_title[:45]
+            elif resp.headers.get("Server"):
+                title = f"{resp.headers.get('Server')[:35]} ({resp.status_code})"
+            else:
+                title = f"HTTP {resp.status_code} Service" if not is_https else f"HTTPS {resp.status_code} Service"
+
+            return {"ip": ip, "port": port, "url": url, "title": title, "status": "Online", "is_https": is_https}
+        except requests.exceptions.SSLError:
+            if scheme == "https":
+                return {"ip": ip, "port": port, "url": url, "title": "Secure Service (HTTPS)", "status": "Online", "is_https": True}
+        except Exception:
+            continue
+
+    return {"ip": ip, "port": port, "url": f"http://{ip}:{port}", "title": f"TCP Service on {port}", "status": "Online", "is_https": likely_https}
+
 def scan_single_target(ip, port):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2)
+        s.settimeout(0.22)
         result = s.connect_ex((ip, port))
         s.close()
         if result == 0:
-            # Check if this port is known to be HTTPS
-            is_https = port in (443, 8443, 10444, 4443) or port > 10000
-            scheme = "https" if is_https else "http"
-            url = f"{scheme}://{ip}:{port}"
-            title = f"Service on {port}"
-            try:
-                resp = requests.get(url, timeout=0.6, verify=False)
-                if resp.status_code < 500:
-                    match = re.search(r'<title>(.*?)</title>', resp.text, re.IGNORECASE)
-                    if match:
-                        title = match.group(1).strip()[:40]
-            except Exception:
-                # If HTTPS probe failed with cert/ssl error, mark it online anyway since port is open
-                title = "Secure Service (HTTPS)" if is_https else title
-                
-            return {"ip": ip, "port": port, "url": url, "title": title, "status": "Online", "is_https": is_https}
+            return detect_port_protocol_and_title(ip, port)
     except Exception:
         pass
     return None
@@ -524,28 +743,30 @@ FINDER_DASHBOARD_HTML = """
         .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
         button { background: #238636; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-family: monospace; font-weight: bold; }
         button:hover { background: #2ea043; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
         table { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; }
         th, td { text-align: left; padding: 10px; border-bottom: 1px solid #21262d; }
         th { color: #8b949e; }
-        a { color: #58a6ff; text-decoration: none; }
+        a { color: #58a6ff; text-decoration: none; margin-right: 12px; }
         a:hover { text-decoration: underline; }
+        .stream-link { color: #a371f7; font-size: 12px; }
     </style>
 </head>
 <body>
-    <h1>DWS Deep Port & Network Finder</h1>
+    <h1>DWS Deep Port & LAN Server Finder</h1>
     <div class="card">
-        <p>Scans OS listeners, Docker container bindings, ports <b>8380, 10444</b>, and range 3000-9000.</p>
-        <button onclick="startScan()" id="scan-btn">Run Deep Scan</button>
+        <p>Discovers all active hosts on <b>192.168.2.0/24</b> (ARP + subnet sweep), queries SSH cluster nodes directly for open OS/Docker ports, and auto-detects HTTP vs HTTPS.</p>
+        <button onclick="startScan()" id="scan-btn">Run Full LAN & Port Scan</button>
         <span id="status-msg" style="margin-left: 15px; color: #8b949e;">Ready.</span>
     </div>
     <div class="card">
-        <h2>Discovered Services</h2>
+        <h2>Discovered LAN & Local Services</h2>
         <table>
             <thead>
-                <tr><th>Host / IP</th><th>Port</th><th>Detected Title / Service</th><th>Proxy Link</th></tr>
+                <tr><th>Host / IP</th><th>Port</th><th>Detected Title / Service</th><th>Actions</th></tr>
             </thead>
             <tbody id="results-table">
-                <tr><td colspan="4" style="color: #8b949e;">Click 'Run Deep Scan' to begin.</td></tr>
+                <tr><td colspan="4" style="color: #8b949e;">Click 'Run Full LAN & Port Scan' to begin.</td></tr>
             </tbody>
         </table>
     </div>
@@ -555,38 +776,47 @@ FINDER_DASHBOARD_HTML = """
             const msg = document.getElementById('status-msg');
             const tbody = document.getElementById('results-table');
             btn.disabled = true;
-            msg.innerText = "Scanning Docker containers, OS ports, and custom ranges...";
-            tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Deep scanning in progress...</td></tr>`;
-            
+            msg.innerText = "Sweeping 192.168.2.0/24 subnet, SSH nodes, Docker bindings, and local sockets...";
+            tbody.innerHTML = `<tr><td colspan="4" style="color: #d29922;">Deep LAN scan in progress (takes ~3-5 seconds)...</td></tr>`;
+
             try {
                 const res = await fetch('/finder/scan');
                 const data = await res.json();
-                msg.innerText = `Scan complete. Found ${data.services.length} active endpoint(s).`;
-                if(data.services.length === 0) {
+                msg.innerText = `Scan complete across ${data.hosts_scanned || 0} active LAN hosts. Found ${data.services.length} endpoint(s).`;
+                if (data.services.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="4">No services discovered.</td></tr>`;
                 } else {
                     tbody.innerHTML = data.services.map(s => {
-                        let link = "";
+                        let proxyLink = "";
+                        let streamLink = "";
                         if (s.ip === '127.0.0.1' || s.ip === 'localhost') {
-                            link = s.is_https ? `<a href="/https/localhost:${s.port}" target="_blank">Open HTTPS Proxy (/https/localhost:${s.port})</a>` :
-                                               `<a href="/port/${s.port}" target="_blank">Open Port Proxy (/port/${s.port})</a>`;
+                            proxyLink = s.is_https
+                                ? `<a href="/https/127.0.0.1:${s.port}/" target="_blank">Open HTTPS Proxy</a>`
+                                : `<a href="/port/${s.port}/" target="_blank">Open Port Proxy</a>`;
+                            streamLink = s.is_https
+                                ? `<a class="stream-link" href="/stream/https/127.0.0.1:${s.port}" target="_blank">[Stream Browser]</a>`
+                                : `<a class="stream-link" href="/stream/port/${s.port}" target="_blank">[Stream Browser]</a>`;
                         } else {
-                            link = s.is_https ? `<a href="/https/${s.ip}:${s.port}" target="_blank">Open HTTPS Proxy (/https/${s.ip}:${s.port})</a>` :
-                                               `<a href="/address/${s.ip}:${s.port}" target="_blank">Open Address Proxy (/address/${s.ip}:${s.port})</a>`;
+                            proxyLink = s.is_https
+                                ? `<a href="/https/${s.ip}:${s.port}/" target="_blank">Open HTTPS Proxy</a>`
+                                : `<a href="/address/${s.ip}:${s.port}/" target="_blank">Open Address Proxy</a>`;
+                            streamLink = s.is_https
+                                ? `<a class="stream-link" href="/stream/https/${s.ip}:${s.port}" target="_blank">[Stream Browser]</a>`
+                                : `<a class="stream-link" href="/stream/address/${s.ip}:${s.port}" target="_blank">[Stream Browser]</a>`;
                         }
                         return `
                             <tr>
                                 <td><b>${s.ip}</b></td>
-                                <td><b>${s.port} ${s.is_https ? '(HTTPS)' : ''}</b></td>
+                                <td><b>${s.port} ${s.is_https ? '<span style="color:#3fb950;">(HTTPS)</span>' : '(HTTP)'}</b></td>
                                 <td>${s.title}</td>
-                                <td>${link}</td>
+                                <td>${proxyLink} ${streamLink}</td>
                             </tr>
                         `;
                     }).join('');
                 }
             } catch(e) {
                 msg.innerText = "Scan failed.";
-                tbody.innerHTML = `<tr><td colspan="4" style="color: #da3633;">Error running deep scan.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="4" style="color: #da3633;">Error running deep scan: ${e}</td></tr>`;
             }
             btn.disabled = false;
         }
@@ -602,29 +832,42 @@ def finder_page():
 @app.route('/finder/scan', methods=['GET'])
 def finder_scan_api():
     discovered = []
-    
-    # Gather ports from OS sockets, Docker containers, and explicitly add user-noted ports (8380, 10444)
-    active_ports = get_active_local_ports().union(get_docker_bound_ports())
-    active_ports.update({8380, 10444})
-    
-    ports_to_scan = sorted(list(active_ports.union(set(range(3000, 9001)))))
-    targets = ["127.0.0.1", "192.168.2.143", "192.168.2.91", "192.168.2.134"]
-    
-    with ThreadPoolExecutor(max_workers=100) as executor:
-        futures = []
-        for ip in targets:
-            node_ports = ports_to_scan if ip == "127.0.0.1" else [80, 443, 3000, 5000, 5050, 8000, 8080, 8380, 8989, 9000, 10444]
-            for port in node_ports:
-                futures.append(executor.submit(scan_single_target, ip, port))
-        
+
+    # 1. Gather all local ports (OS sockets + Docker + common home lab ports)
+    local_ports = get_active_local_ports().union(get_docker_bound_ports()).union(set(COMMON_LAN_PORTS))
+
+    # 2. Discover all active hosts on the 192.168.2.0/24 LAN
+    lan_hosts = discover_lan_hosts("192.168.2")
+
+    # 3. Map exact listening ports for known SSH servers, and common ports for other discovered LAN devices
+    ssh_host_map = {srv["host"]: srv for srv in SERVERS.values()}
+    host_port_targets = []
+
+    for ip in lan_hosts:
+        if ip == "127.0.0.1":
+            for p in sorted(local_ports):
+                host_port_targets.append((ip, p))
+        elif ip in ssh_host_map:
+            remote_ports = get_remote_ssh_listening_ports(ssh_host_map[ip])
+            for p in remote_ports:
+                host_port_targets.append((ip, p))
+        else:
+            for p in COMMON_LAN_PORTS:
+                host_port_targets.append((ip, p))
+
+    with ThreadPoolExecutor(max_workers=64) as executor:
+        futures = [executor.submit(scan_single_target, ip, port) for ip, port in host_port_targets]
         for future in futures:
             res = future.result()
             if res:
                 if not any(d['ip'] == res['ip'] and d['port'] == res['port'] for d in discovered):
                     discovered.append(res)
-                    
-    discovered.sort(key=lambda x: (x['ip'], x['port']))
-    return jsonify({"services": discovered})
+
+    discovered.sort(key=lambda x: ([int(part) for part in x['ip'].split('.')], x['port']))
+    return jsonify({
+        "hosts_scanned": len(lan_hosts),
+        "services": discovered
+    })
 
 # ==========================================
 # MODULE 6: DWS Compute Engine (Unload -> Process -> Return)
@@ -651,7 +894,6 @@ with open("output.json", "w", encoding="utf-8") as f:
 """
 
 def select_compute_target(requested_target):
-    """Selects 'local' or server ID ('1', '2', '3'), or least-loaded node on 'auto'."""
     if requested_target in ("local", "1", "2", "3"):
         return requested_target
     if requested_target == "auto":
@@ -659,7 +901,6 @@ def select_compute_target(requested_target):
     return "local"
 
 def prune_job_history():
-    """Keeps compute_jobs dictionary bounded in memory."""
     if len(compute_jobs) > MAX_JOB_HISTORY:
         completed = [
             (jid, j["created_at"]) for jid, j in compute_jobs.items()
@@ -670,7 +911,6 @@ def prune_job_history():
             compute_jobs.pop(jid, None)
 
 def parse_compute_request(req):
-    """Normalizes either application/json or multipart/form-data requests into a job spec."""
     if req.content_type and req.content_type.startswith("multipart/form-data"):
         form = req.form
         raw_input = form.get("input_data", "{}")
@@ -716,7 +956,6 @@ def parse_compute_request(req):
     return spec
 
 def emit_compute_telemetry(job_meta, stream_sid=None):
-    """Broadcasts job updates to the live dashboard and optional SocketIO caller."""
     summary = {
         "job_id": job_meta["job_id"],
         "status": job_meta["status"],
@@ -731,7 +970,6 @@ def emit_compute_telemetry(job_meta, stream_sid=None):
         socketio.emit("compute_status", summary, to=stream_sid)
 
 def execute_local_job(job_id, job_dir, cmd, env, timeout, stream_sid=None):
-    """Executes a compute job locally in its own OS process group without blocking Eventlet."""
     proc = subprocess.Popen(
         cmd,
         cwd=job_dir,
@@ -774,7 +1012,6 @@ def execute_local_job(job_id, job_dir, cmd, env, timeout, stream_sid=None):
     return stdout_str, stderr_str, proc.returncode, False
 
 def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, timeout, stream_sid=None):
-    """Offloads the staged job directory over SFTP/SSH to a cluster node in SERVERS."""
     server = SERVERS[server_id]
     remote_dir = f"/dev/shm/dws_compute_{job_id}"
     ssh = paramiko.SSHClient()
@@ -790,7 +1027,6 @@ def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, tim
         except IOError:
             pass
 
-        # Upload all staged files from local RAM-disk to remote node RAM-disk
         for fname in os.listdir(job_dir):
             local_fpath = os.path.join(job_dir, fname)
             if os.path.isfile(local_fpath):
@@ -828,7 +1064,6 @@ def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, tim
 
             eventlet.sleep(0.03)
 
-        # Drain remaining buffers
         while channel.recv_ready():
             stdout_chunks.append(channel.recv(4096).decode("utf-8", errors="replace"))
         while channel.recv_stderr_ready():
@@ -836,7 +1071,6 @@ def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, tim
 
         exit_code = channel.recv_exit_status()
 
-        # Pull back output.json or transformed output file if generated
         for pull_file in ("output.json", output_filename):
             if pull_file:
                 try:
@@ -844,7 +1078,6 @@ def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, tim
                 except IOError:
                     pass
 
-        # Clean up remote RAM-disk
         ssh.exec_command(f"rm -rf {remote_dir}")
         return "".join(stdout_chunks), "".join(stderr_chunks), exit_code, False
 
@@ -859,7 +1092,6 @@ def execute_ssh_job(job_id, server_id, job_dir, remote_cmd, output_filename, tim
             pass
 
 def run_compute_pipeline(job_id, spec, stream_sid=None):
-    """Core unload -> process -> return lifecycle runner."""
     job_meta = compute_jobs[job_id]
     target = job_meta["target"]
     job_dir = os.path.join(COMPUTE_RAMDISK, job_id)
@@ -871,18 +1103,15 @@ def run_compute_pipeline(job_id, spec, stream_sid=None):
     emit_compute_telemetry(job_meta, stream_sid)
 
     try:
-        # 1. Stage input JSON data
         with open(os.path.join(job_dir, "input.json"), "w", encoding="utf-8") as f:
             json.dump(spec.get("input_data", {}), f)
 
-        # 2. Stage binary input file if provided
         input_filename = spec.get("input_filename", "")
         output_filename = spec.get("output_filename", "output.bin")
         if spec.get("input_bytes"):
             with open(os.path.join(job_dir, input_filename), "wb") as f:
                 f.write(spec["input_bytes"])
 
-        # 3. Build execution command & environment
         env = os.environ.copy()
         for k, v in (spec.get("env") or {}).items():
             env[str(k)] = str(v)
@@ -908,7 +1137,6 @@ def run_compute_pipeline(job_id, spec, stream_sid=None):
         else:
             raise ValueError(f"Unsupported compute type: {job_type}")
 
-        # 4. Dispatch to Local OS Process or Remote Cluster SSH Node
         timeout = spec.get("timeout", 60)
         if target == "local":
             stdout_str, stderr_str, exit_code, timed_out = execute_local_job(
@@ -921,7 +1149,6 @@ def run_compute_pipeline(job_id, spec, stream_sid=None):
         else:
             raise ValueError(f"Unknown compute target: {target}")
 
-        # 5. Collect output payload & artifacts
         job_meta["stdout"] = stdout_str
         job_meta["stderr"] = stderr_str
         job_meta["exit_code"] = exit_code
@@ -934,7 +1161,6 @@ def run_compute_pipeline(job_id, spec, stream_sid=None):
             except Exception:
                 pass
         elif job_type == "shell":
-            # If shell command outputs valid JSON to stdout, parse it into result automatically
             stripped = stdout_str.strip()
             if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
                 try:
@@ -978,7 +1204,6 @@ def run_compute_pipeline(job_id, spec, stream_sid=None):
         if stream_sid:
             socketio.emit("compute_result", job_meta, to=stream_sid)
 
-        # Optional Webhook Callback for Async Jobs
         callback_url = spec.get("callback_url")
         if callback_url:
             try:
@@ -1012,12 +1237,10 @@ def create_job_record(spec):
 
 @app.route('/compute/run', methods=['POST'])
 def compute_run_sync():
-    """Synchronous Unload -> Process -> Return endpoint."""
     spec = parse_compute_request(request)
     job_id, job_meta = create_job_record(spec)
     run_compute_pipeline(job_id, spec)
 
-    # Stream raw file directly back if requested and available
     if spec.get("return_raw") and job_meta.get("output_file_b64"):
         raw_bytes = base64.b64decode(job_meta["output_file_b64"])
         return send_file(
@@ -1032,7 +1255,6 @@ def compute_run_sync():
 
 @app.route('/compute/enqueue', methods=['POST'])
 def compute_enqueue_async():
-    """Asynchronous Fire-and-Forget endpoint. Returns job_id immediately."""
     spec = parse_compute_request(request)
     job_id, job_meta = create_job_record(spec)
     socketio.start_background_task(run_compute_pipeline, job_id, spec)
@@ -1046,7 +1268,6 @@ def compute_enqueue_async():
 
 @app.route('/compute/job/<job_id>', methods=['GET'])
 def compute_get_job(job_id):
-    """Polls status or downloads output artifact of an enqueued job."""
     job_meta = compute_jobs.get(job_id)
     if not job_meta:
         return jsonify({"error": "Job ID not found"}), 404
@@ -1063,7 +1284,6 @@ def compute_get_job(job_id):
 
 @app.route('/compute/cancel/<job_id>', methods=['POST'])
 def compute_cancel_job(job_id):
-    """Terminates a running local or remote SSH compute process."""
     job_meta = compute_jobs.get(job_id)
     if not job_meta:
         return jsonify({"error": "Job ID not found"}), 404
@@ -1083,7 +1303,6 @@ def compute_cancel_job(job_id):
 
 @app.route('/compute/status', methods=['GET'])
 def compute_system_status():
-    """Returns host hardware telemetry, RAM-disk space, and cluster job distribution."""
     load_avg = os.getloadavg() if hasattr(os, "getloadavg") else (0.0, 0.0, 0.0)
     shm_usage = shutil.disk_usage(COMPUTE_RAMDISK)
     recent_jobs = sorted(compute_jobs.values(), key=lambda x: x["created_at"], reverse=True)[:25]
@@ -1108,7 +1327,7 @@ def compute_system_status():
 
 @socketio.on('compute_dispatch')
 def handle_socket_compute(data):
-    """WebSocket streaming compute handler."""
+    data = data or {}
     client_sid = request.sid
     spec = {
         "type": data.get("type", "python"),
@@ -1243,9 +1462,9 @@ def compute_dashboard():
 def catch_all_fallback(missing_path):
     """
     Handles cases where the web app's client-side router drops the proxy prefix
-    (e.g., changes the URL to /login). It uses the Referer or a sticky cookie to route it.
+    (e.g., changes the URL to /login or /assets/app.js).
     """
-    # 1. Try Referer first (Most accurate if present)
+    # 1. Try Referer first
     referer = request.headers.get('Referer')
     if referer:
         parsed_referer = urlparse(referer)
@@ -1255,39 +1474,35 @@ def catch_all_fallback(missing_path):
             host_port = match.group(2)
             correct_path = f"/{proxy_type}/{host_port}/{missing_path}"
             if request.query_string:
-                correct_path += f"?{request.query_string.decode('utf-8')}"
+                correct_path += f"?{request.query_string.decode('utf-8', errors='replace')}"
             return redirect(correct_path, code=307)
 
-    # 2. SPA Fallback: Use the sticky cookie we set during the initial load
+    # 2. SPA Fallback: Use the sticky cookie set during the initial load
     active_target = request.cookies.get('dws_active_target')
     if active_target:
         try:
             parsed_target = urlparse(active_target)
-            scheme = parsed_target.scheme
+            scheme = parsed_target.scheme or 'http'
             host = parsed_target.hostname
-            # Default to standard ports if not specified in the URL
             port = parsed_target.port or (443 if scheme == 'https' else 80)
-            
-            # Proxy directly to prevent the browser's address bar from flickering
-            return perform_proxy(scheme, host, port, missing_path)
+
+            if host and not (int(port) == DWS_LISTEN_PORT and host in LOCAL_HOST_IPS):
+                return perform_proxy(scheme, host, port, missing_path)
         except Exception as e:
             logging.error(f"Fallback proxy error for SPA routing: {e}")
 
     return jsonify({
-        "error": "Not Found", 
-        "details": "No active target session found. Try loading the device through the main proxy URL first."
+        "error": "Not Found",
+        "details": "No active target session found. Open /finder to scan and launch a service."
     }), 404
 
 
 # ==========================================
 # APP EXECUTION
 # ==========================================
-
 if __name__ == '__main__':
-
-
     logging.info("Starting DWS Server Shell backend...")
-    
+
     # --- MODULE 2: Start the Gatekeeper ---
     gatekeeper_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gatekeeper.py')
     if os.path.exists(gatekeeper_script):
@@ -1305,5 +1520,5 @@ if __name__ == '__main__':
             [sys.executable, "aurora.py"],
             stdout=sys.stdout, stderr=sys.stderr, close_fds=True
         )
-    
-    socketio.run(app, host='0.0.0.0', port=5000)
+
+    socketio.run(app, host='0.0.0.0', port=DWS_LISTEN_PORT)
