@@ -201,7 +201,7 @@ def perform_proxy(scheme, target_host, target_port, subpath):
         excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
         resp_headers = []
         
-        if target_host == '127.0.0.1' and scheme == 'http':
+        if target_host == '0.0.0.0' and scheme == 'http':
             base_proxy_url = f"/port/{target_port}"
         elif scheme == 'https':
             base_proxy_url = f"/https/{target_host}:{target_port}"
