@@ -25,6 +25,7 @@ OLLAMA_BASE_URL = "http://192.168.2.134:11434"
 OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
 OLLAMA_PS_URL = f"{OLLAMA_BASE_URL}/api/ps"
+OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 
 DB_NAME = "aurora.db"
 
@@ -35,7 +36,6 @@ MODEL_MAP = {
     "DWS:Optic": "DWS:Optic"
 }
 
-# Ordered backup failover priority per primary model
 FALLBACK_CHAIN = {
     "DWS:Aurora": ["DWS:Swift", "DWS:Avani", "DWS:Optic"],
     "DWS:Swift": ["DWS:Aurora", "DWS:Avani", "DWS:Optic"],
@@ -43,16 +43,16 @@ FALLBACK_CHAIN = {
     "DWS:Optic": ["DWS:Aurora", "DWS:Swift", "DWS:Avani"]
 }
 
-# Timeout settings (in seconds)
 CONNECT_TIMEOUT = 8.0          # Max time to establish TCP connection to Ollama
-FIRST_TOKEN_TIMEOUT = 35.0     # Max wait for model to load into VRAM and emit first token
+FIRST_TOKEN_TIMEOUT = 40.0     # Max wait for model to load into VRAM and emit first token
 CHUNK_STALL_TIMEOUT = 25.0     # Max wait between tokens once streaming has started
 HEARTBEAT_INTERVAL = 4.0       # Emit a "still waiting / loading" notice every N seconds
 
-TEXT_FILE_EXTENSIONS = {
-    '.txt', '.md', '.py', '.js', '.ts', '.html', '.css', '.json',
-    '.csv', '.xml', '.yaml', '.yml', '.sh', '.bat', '.log', '.ini',
-    '.cfg', '.sql', '.c', '.cpp', '.h', '.java', '.rs', '.go'
+# Casual/short inputs that should NEVER trigger an AI web-search check
+SKIP_SEARCH_PATTERNS = {
+    "hi", "hello", "hey", "yo", "sup", "olo", "test", "testing", "ping",
+    "ok", "okay", "k", "lol", "lmao", "thanks", "thank you", "thx", "ty",
+    "yes", "no", "yep", "nope", "cool", "nice", "good", "great", "wtf", "bruh"
 }
 
 # ---------------------------------------------------------
@@ -60,7 +60,6 @@ TEXT_FILE_EXTENSIONS = {
 # ---------------------------------------------------------
 
 def get_db_connection():
-    """Creates a thread-safe SQLite connection with WAL mode enabled."""
     conn = sqlite3.connect(DB_NAME, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -80,7 +79,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS chat_summaries
                  (chat_id TEXT PRIMARY KEY, summary TEXT, last_summarized_id INTEGER)''')
 
-    # Auto-migrate existing tables to support new features without losing data
     existing_chat_cols = {row["name"] for row in c.execute("PRAGMA table_info(chats)").fetchall()}
     if "system_prompt" not in existing_chat_cols:
         c.execute("ALTER TABLE chats ADD COLUMN system_prompt TEXT DEFAULT ''")
@@ -116,11 +114,35 @@ def cleanup_old_history():
     conn.close()
 
 # ---------------------------------------------------------
+# VRAM MANAGEMENT & CUDA RECOVERY HELPERS
+# ---------------------------------------------------------
+
+def free_other_models_in_vram(target_model):
+    """
+    Checks /api/ps on the Ollama server and unloads any OTHER models currently
+    sitting in VRAM so target_model has maximum contiguous GPU memory.
+    """
+    try:
+        res = requests.get(OLLAMA_PS_URL, timeout=4)
+        if res.status_code == 200:
+            running = res.json().get("models", [])
+            for m in running:
+                m_name = m.get("name", "")
+                if m_name and not m_name.startswith(target_model):
+                    print(f"[*] Unloading '{m_name}' from VRAM to make room for '{target_model}'...")
+                    requests.post(
+                        OLLAMA_GENERATE_URL,
+                        json={"model": m_name, "keep_alive": 0},
+                        timeout=5
+                    )
+    except Exception as e:
+        print(f"[*] VRAM cleanup check skipped: {e}")
+
+# ---------------------------------------------------------
 # IMAGE & FILE PROCESSING UTILITIES
 # ---------------------------------------------------------
 
 def detect_image_mime(raw_bytes):
-    """Detects image MIME type from magic header bytes."""
     if raw_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
         return 'image/png'
     if raw_bytes.startswith(b'\xff\xd8\xff'):
@@ -135,11 +157,7 @@ def detect_image_mime(raw_bytes):
 
 def normalize_image_input(img_input, filename="image"):
     """
-    Accepts a Data URI ('data:image/png;base64,...'), raw base64 string, raw bytes, or URL.
-    Returns:
-      - ollama_b64: pure base64 string WITHOUT header (required by Ollama)
-      - data_uri: full 'data:image/...;base64,...' string (for browser display)
-      - meta: dict with filename, mime, size_kb
+    Strips 'data:image/...;base64,' headers for Ollama while keeping full Data URIs for UI display.
     """
     try:
         raw_bytes = None
@@ -154,7 +172,6 @@ def normalize_image_input(img_input, filename="image"):
             if not s:
                 return None
 
-            # Case 1: Full Data URI (e.g., data:image/jpeg;base64,/9j/4AAQ...)
             if s.startswith("data:"):
                 match = re.match(r"^data:([^;]+);base64,(.+)$", s, re.DOTALL)
                 if match:
@@ -162,22 +179,18 @@ def normalize_image_input(img_input, filename="image"):
                     b64_part = re.sub(r"\s+", "", match.group(2))
                     raw_bytes = base64.b64decode(b64_part)
                 else:
-                    # Fallback split if regex didn't match standard header
                     _, b64_part = s.split(",", 1)
                     b64_part = re.sub(r"\s+", "", b64_part)
                     raw_bytes = base64.b64decode(b64_part)
 
-            # Case 2: Direct HTTP/HTTPS Image URL
             elif s.startswith("http://") or s.startswith("https://"):
                 resp = requests.get(s, timeout=8)
                 if resp.status_code == 200:
                     raw_bytes = resp.content
                     mime_type = resp.headers.get("Content-Type", "").split(";")[0] or detect_image_mime(raw_bytes)
 
-            # Case 3: Raw Base64 string
             else:
                 clean_b64 = re.sub(r"\s+", "", s)
-                # Fix missing base64 padding if needed
                 missing_padding = len(clean_b64) % 4
                 if missing_padding:
                     clean_b64 += "=" * (4 - missing_padding)
@@ -207,16 +220,11 @@ def normalize_image_input(img_input, filename="image"):
         return None
 
 def parse_incoming_request():
-    """
-    Extracts chat parameters, images, and non-image text/code files from EITHER
-    application/json OR multipart/form-data requests.
-    """
     data = {}
     if request.is_json:
         data = request.get_json(silent=True) or {}
     elif request.form:
         data = request.form.to_dict()
-        # Support JSON-encoded arrays inside form fields
         for k in ('images', 'files', 'attachments'):
             if k in data and isinstance(data[k], str):
                 try:
@@ -224,7 +232,6 @@ def parse_incoming_request():
                 except Exception:
                     pass
     else:
-        # Fallback if client sent JSON without proper Content-Type header
         try:
             raw_text = request.get_data(as_text=True)
             if raw_text:
@@ -240,12 +247,11 @@ def parse_incoming_request():
     force_search = bool(data.get('force_search', False))
     disable_search = bool(data.get('disable_search', False))
 
-    ollama_images = []       # Raw base64 strings for Ollama
-    preview_data_uris = []   # Full Data URIs for frontend & DB
-    attachment_metas = []    # Metadata about uploaded images & files
-    extracted_file_texts = []  # Text extracted from uploaded code/text documents
+    ollama_images = []
+    preview_data_uris = []
+    attachment_metas = []
+    extracted_file_texts = []
 
-    # 1. Process JSON 'image' and 'images' fields
     raw_images_input = []
     if data.get('image'):
         if isinstance(data['image'], list):
@@ -273,7 +279,6 @@ def parse_incoming_request():
             preview_data_uris.append(norm["data_uri"])
             attachment_metas.append(norm["meta"])
         else:
-            # Check if a text file was sent as a data:text/... URI inside 'images'/'image'
             if isinstance(b64_or_uri, str) and b64_or_uri.startswith("data:") and ";base64," in b64_or_uri:
                 try:
                     header, b64_body = b64_or_uri.split(";base64,", 1)
@@ -289,7 +294,6 @@ def parse_incoming_request():
                 except Exception as e:
                     print(f"[*] Could not decode non-image data URI: {e}")
 
-    # 2. Process JSON 'files' or 'attachments' array
     raw_files_json = data.get('files') or data.get('attachments') or []
     if isinstance(raw_files_json, list):
         for idx, fobj in enumerate(raw_files_json):
@@ -299,7 +303,6 @@ def parse_incoming_request():
             fcontent = fobj.get('content') or fobj.get('data') or ''
             fmime = fobj.get('type') or fobj.get('mime') or ''
 
-            # Check if it's an image first
             if fmime.startswith("image/") or (isinstance(fcontent, str) and fcontent.startswith("data:image/")):
                 norm = normalize_image_input(fcontent, filename=fname)
                 if norm:
@@ -308,7 +311,6 @@ def parse_incoming_request():
                     attachment_metas.append(norm["meta"])
                     continue
 
-            # Otherwise treat as text/code document
             if isinstance(fcontent, str):
                 if ";base64," in fcontent:
                     try:
@@ -328,7 +330,6 @@ def parse_incoming_request():
                     "size_kb": round(len(text_body.encode("utf-8", errors="ignore")) / 1024, 1)
                 })
 
-    # 3. Process multipart/form-data files (request.files)
     if request.files:
         for key in request.files:
             file_list = request.files.getlist(key)
@@ -348,7 +349,6 @@ def parse_incoming_request():
                         preview_data_uris.append(norm["data_uri"])
                         attachment_metas.append(norm["meta"])
                 else:
-                    # Decode as text/code file
                     text_body = raw_bytes.decode("utf-8", errors="replace")
                     extracted_file_texts.append((fname, text_body[:25000]))
                     attachment_metas.append({
@@ -373,13 +373,13 @@ def parse_incoming_request():
     }
 
 # ---------------------------------------------------------
-# MEMORY COMPACTION & AUTO-TITLING
+# POST-STREAM MEMORY COMPACTION & TITLING (NO VRAM THRASHING)
 # ---------------------------------------------------------
 
-def compact_chat_memory(chat_id):
+def compact_chat_memory(chat_id, active_model="DWS:Swift"):
     """
-    Uses DWS:Swift to fold older messages into a running summary.
-    Leaves the most recent 6 messages verbatim.
+    Uses the currently active model (so Ollama doesn't swap models in VRAM)
+    to fold older messages into a running summary after streaming completes.
     """
     conn = get_db_connection()
     c = conn.cursor()
@@ -416,9 +416,10 @@ def compact_chat_memory(chat_id):
 
     try:
         res = requests.post(OLLAMA_URL, json={
-            "model": MODEL_MAP.get("DWS:Swift", "DWS:Swift"),
+            "model": active_model,
             "messages": [{"role": "user", "content": prompt}],
-            "stream": False
+            "stream": False,
+            "options": {"num_ctx": 2048}
         }, timeout=12)
 
         if res.status_code == 200:
@@ -433,47 +434,50 @@ def compact_chat_memory(chat_id):
                         last_summarized_id = excluded.last_summarized_id
                 """, (chat_id, updated_summary, newest_id))
                 conn.commit()
-                print(f"[*] Memory compacted for chat {chat_id}")
+                print(f"[*] Memory compacted for chat {chat_id} using {active_model}")
     except Exception as e:
         print(f"[*] Memory compaction skipped/failed: {e}")
     finally:
         conn.close()
 
-def async_generate_chat_title(chat_id, first_user_message):
-    """Generates a concise 3-5 word title in the background using DWS:Swift."""
-    if not first_user_message or len(first_user_message.strip()) < 10:
-        return
-
+def run_post_stream_tasks(chat_id, is_new_chat, first_user_message, model_to_use):
+    """
+    Runs title generation and memory compaction sequentially in a background thread
+    AFTER the main response finishes streaming, using the model ALREADY in VRAM.
+    """
     def _worker():
         try:
-            prompt = (
-                "Generate a concise 3 to 5 word title for a chat starting with this message. "
-                "Output ONLY the title text, no quotes or punctuation:\n\n"
-                f"{first_user_message[:300]}"
-            )
-            res = requests.post(OLLAMA_URL, json={
-                "model": MODEL_MAP.get("DWS:Swift", "DWS:Swift"),
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False
-            }, timeout=10)
-            if res.status_code == 200:
-                new_title = res.json().get("message", {}).get("content", "").strip().strip('"\'')
-                if 2 < len(new_title) <= 60:
-                    conn = get_db_connection()
-                    conn.execute("UPDATE chats SET title = ? WHERE id = ?", (new_title, chat_id))
-                    conn.commit()
-                    conn.close()
+            if is_new_chat and first_user_message and len(first_user_message.strip()) >= 12:
+                prompt = (
+                    "Generate a concise 3 to 5 word title for a chat starting with this message. "
+                    "Output ONLY the title text, no quotes or punctuation:\n\n"
+                    f"{first_user_message[:300]}"
+                )
+                res = requests.post(OLLAMA_URL, json={
+                    "model": model_to_use,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "options": {"num_ctx": 1024}
+                }, timeout=10)
+                if res.status_code == 200:
+                    new_title = res.json().get("message", {}).get("content", "").strip().strip('"\'')
+                    if 2 < len(new_title) <= 60:
+                        conn = get_db_connection()
+                        conn.execute("UPDATE chats SET title = ? WHERE id = ?", (new_title, chat_id))
+                        conn.commit()
+                        conn.close()
+
+            compact_chat_memory(chat_id, active_model=model_to_use)
         except Exception:
             pass
 
     threading.Thread(target=_worker, daemon=True).start()
 
 # ---------------------------------------------------------
-# AUTH & WEB SEARCH HELPERS
+# AUTH & SMART WEB SEARCH (NO VRAM THRASHING)
 # ---------------------------------------------------------
 
 def get_current_user():
-    """Extracts user_id from Headers, JSON payload, Form data, or Cookies."""
     api_user = request.headers.get('X-User-Id')
     if api_user:
         return api_user
@@ -488,13 +492,29 @@ def get_current_user():
 
     return request.cookies.get('aurora_user_id', 'anonymous')
 
-def fetch_internet_context(prompt, model_name, force_search=False):
+def should_consider_web_search(prompt):
     """
-    Smart web search engine with strict query sanitization and timeout protection.
-    Skips empty prompts so image-only uploads don't trigger random web searches.
+    Fast zero-VRAM Python check so trivial prompts like 'olo', 'hi', or code snippets
+    don't spin up a separate LLM call before the main generation.
+    """
+    clean = (prompt or "").strip()
+    if not clean or len(clean) < 6:
+        return False
+    lower = clean.lower().strip("?!., ")
+    if lower in SKIP_SEARCH_PATTERNS:
+        return False
+    # Skip if it's mostly code
+    if "```" in clean or "def " in clean or "import " in clean or "function(" in clean:
+        return False
+    return True
+
+def fetch_internet_context(prompt, active_model, force_search=False):
+    """
+    Uses the SAME model (`active_model`) that will generate the reply so Ollama
+    never swaps two different models in and out of VRAM on a single request.
     """
     clean_prompt = (prompt or "").strip()
-    if not clean_prompt and not force_search:
+    if not force_search and not should_consider_web_search(clean_prompt):
         return ""
 
     search_query = None
@@ -503,21 +523,22 @@ def fetch_internet_context(prompt, model_name, force_search=False):
         search_query = clean_prompt[:120]
     else:
         check_payload = {
-            "model": model_name,
+            "model": active_model,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        "You are an aggressive web-search decision engine. Trigger a search for ANY factual, "
-                        "real-world, informational, current events, specs, time/date, or general knowledge question. "
-                        "Output ONLY a short 2 to 7 word search query (no quotes, no explanation). "
-                        "Output ONLY the exact word 'NO' if the prompt is purely creative writing, "
-                        "code debugging/generation, analyzing an attached image/file, or a casual greeting."
+                        "You are a web-search decision engine. Trigger a search ONLY for factual, "
+                        "real-world, current events, live info, specs, or general knowledge questions. "
+                        "Output ONLY a short 2 to 6 word search query (no quotes, no explanation). "
+                        "Output ONLY the exact word 'NO' if the prompt is casual chat, creative writing, "
+                        "math/coding, or doesn't need external facts."
                     )
                 },
                 {"role": "user", "content": clean_prompt}
             ],
-            "stream": False
+            "stream": False,
+            "options": {"num_ctx": 1024}
         }
 
         try:
@@ -525,12 +546,10 @@ def fetch_internet_context(prompt, model_name, force_search=False):
             if res.status_code == 200:
                 ai_decision = res.json().get('message', {}).get('content', '').strip().strip('"\'')
                 first_line = ai_decision.splitlines()[0].strip() if ai_decision else "NO"
-                # Reject "NO" or overly long conversational refusals
                 if (
                     first_line.upper() not in ("NO", "NO.", "NONE", "N/A")
-                    and len(first_line) > 1
-                    and len(first_line) <= 100
-                    and not first_line.lower().startswith("i cannot")
+                    and 2 < len(first_line) <= 90
+                    and not first_line.lower().startswith(("i cannot", "i am", "sure", "hello"))
                 ):
                     search_query = first_line
         except Exception as e:
@@ -539,7 +558,7 @@ def fetch_internet_context(prompt, model_name, force_search=False):
     if not search_query:
         return ""
 
-    print(f"[*] Aurora requested web search for: '{search_query}'")
+    print(f"[*] Web search triggered for: '{search_query}'")
     current_time = datetime.datetime.now(ZoneInfo('America/Vancouver')).strftime("%I:%M %p on %A, %B %d, %Y")
     context = f"[System Note: Your internal clock is {current_time}. Always use 12-hour AM/PM format.]\n\n"
     context += f"Here is real-time information from the internet (Search query: '{search_query}'):\n"
@@ -549,43 +568,42 @@ def fetch_internet_context(prompt, model_name, force_search=False):
             results = list(ddgs.text(search_query, max_results=4))
         if results:
             for r in results:
-                title = r.get('title', 'Source')
-                body = r.get('body', '')
-                href = r.get('href', '')
-                context += f"- {title} ({href}): {body}\n"
+                context += f"- {r.get('title', 'Source')} ({r.get('href', '')}): {r.get('body', '')}\n"
             return context + "\n"
         else:
             return context + "- No internet results found.\n\n"
     except Exception as e:
         print(f"[*] DuckDuckGo search failed: {e}")
-        return context + "- Live web search encountered an error; rely on internal knowledge.\n\n"
+        return ""
 
 # ---------------------------------------------------------
-# NON-BLOCKING STREAM WORKER WITH HEARTBEATS & FAILOVER
+# NON-BLOCKING STREAM WORKER WITH CUDA CRASH RECOVERY
 # ---------------------------------------------------------
 
-def stream_from_ollama_with_timeout(model_name, messages_payload, temperature=None):
+def stream_from_ollama_with_timeout(model_name, messages_payload, temperature=None, safe_low_vram=False):
     """
-    Runs the Ollama request in a background thread and yields events via a Queue.
-    Yields tuples of:
-      ("heartbeat", elapsed_seconds)
-      ("token", text_chunk)
-      ("done", metrics_dict)
-      ("error", error_reason_string)
+    Streams tokens from Ollama in a worker thread with heartbeat & stall detection.
+    If safe_low_vram=True, constrains num_ctx to 2048 to prevent CUDA buffer overruns.
     """
     q = queue.Queue()
     stop_event = threading.Event()
+
+    options = {}
+    if safe_low_vram:
+        options["num_ctx"] = 2048
+    if temperature is not None:
+        try:
+            options["temperature"] = float(temperature)
+        except (ValueError, TypeError):
+            pass
 
     req_payload = {
         "model": model_name,
         "messages": messages_payload,
         "stream": True
     }
-    if temperature is not None:
-        try:
-            req_payload["options"] = {"temperature": float(temperature)}
-        except (ValueError, TypeError):
-            pass
+    if options:
+        req_payload["options"] = options
 
     def _producer():
         try:
@@ -629,7 +647,6 @@ def stream_from_ollama_with_timeout(model_name, messages_payload, temperature=No
                         }))
                         return
 
-                # In case stream closed without explicit "done": true
                 q.put(("done", {}))
 
         except requests.exceptions.ConnectTimeout:
@@ -670,19 +687,16 @@ def stream_from_ollama_with_timeout(model_name, messages_payload, temperature=No
             elapsed_total = now - start_time
             idle_time = now - last_activity
 
-            # Check if waiting too long for the very first token (VRAM cold start hang)
             if not got_first_token and elapsed_total > FIRST_TOKEN_TIMEOUT:
                 stop_event.set()
                 yield ("error", f"Model '{model_name}' did not start responding within {int(FIRST_TOKEN_TIMEOUT)}s")
                 break
 
-            # Check if stream stalled mid-reply
             if got_first_token and idle_time > CHUNK_STALL_TIMEOUT:
                 stop_event.set()
                 yield ("error", f"Model '{model_name}' stopped generating mid-response ({int(CHUNK_STALL_TIMEOUT)}s stall)")
                 break
 
-            # Emit periodic heartbeat while waiting for first token
             if not got_first_token and (now - last_heartbeat) >= HEARTBEAT_INTERVAL:
                 last_heartbeat = now
                 yield ("heartbeat", int(elapsed_total))
@@ -714,7 +728,6 @@ def logout():
 
 @app.route('/api/models', methods=['GET'])
 def get_models():
-    """Returns configured models plus live status from Ollama if reachable."""
     installed_live = []
     running_vram = []
     ollama_online = False
@@ -740,7 +753,6 @@ def get_models():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Live diagnostic endpoint for Ollama server, loaded VRAM models, and SQLite DB."""
     status = {"backend": "online", "ollama_online": False, "loaded_models": [], "db_ok": False}
     try:
         conn = get_db_connection()
@@ -794,7 +806,6 @@ def get_history():
 
 @app.route('/api/search', methods=['GET'])
 def search_chats():
-    """Full-text search across user's chat titles, messages, and summaries."""
     user_id = get_current_user()
     query = (request.args.get('q') or '').strip()
     if not query or user_id == 'anonymous':
@@ -864,7 +875,6 @@ def get_chat_messages(chat_id):
 
 @app.route('/api/chat/<chat_id>/title', methods=['PUT', 'POST'])
 def rename_chat(chat_id):
-    """Rename a chat manually."""
     body = request.get_json(silent=True) or {}
     new_title = (body.get('title') or '').strip()
     if not new_title:
@@ -878,7 +888,6 @@ def rename_chat(chat_id):
 
 @app.route('/api/chat/<chat_id>/system_prompt', methods=['PUT', 'POST'])
 def set_chat_system_prompt(chat_id):
-    """Saves a custom system prompt/persona for a specific chat."""
     body = request.get_json(silent=True) or {}
     sys_prompt = (body.get('system_prompt') or '').strip()
     conn = get_db_connection()
@@ -889,7 +898,6 @@ def set_chat_system_prompt(chat_id):
 
 @app.route('/api/chat/<chat_id>/export', methods=['GET'])
 def export_chat(chat_id):
-    """Exports a conversation as Markdown, JSON, or plain text."""
     fmt = (request.args.get('format') or 'md').lower()
     conn = get_db_connection()
     c = conn.cursor()
@@ -930,7 +938,6 @@ def export_chat(chat_id):
 
 @app.route('/api/chat/<chat_id>/fork', methods=['POST'])
 def fork_chat(chat_id):
-    """Duplicates/branches an existing chat up to an optional message_id."""
     user_id = get_current_user()
     body = request.get_json(silent=True) or {}
     up_to_msg_id = body.get('up_to_message_id')
@@ -1035,11 +1042,7 @@ def generate():
         f"Text Files: {len(extracted_file_texts)}"
     )
 
-    # ---------------------------------------------------------
-    # 1. BUILD ENRICHED MESSAGE & VISUAL UPLOAD CONFIRMATION
-    # ---------------------------------------------------------
-    # Build a visual confirmation block for the user's stored message
-    # so the chat history clearly shows what picture/files were attached.
+    # 1. BUILD ENRICHED PROMPT & UPLOAD CONFIRMATION
     upload_summary_lines = []
     for meta in attachment_metas:
         if meta["type"] == "image":
@@ -1047,7 +1050,6 @@ def generate():
         else:
             upload_summary_lines.append(f"📄 **[File Uploaded: {meta['name']} ({meta['size_kb']} KB)]**")
 
-    # Combine extracted file contents into the prompt sent to Ollama
     prompt_for_ai = message
     if extracted_file_texts:
         file_blocks = "\n\n".join(
@@ -1062,15 +1064,12 @@ def generate():
     if has_images and not prompt_for_ai:
         prompt_for_ai = "Please analyze and describe this image in detail."
 
-    # Display content saved in SQLite
     stored_user_content = message
     if upload_summary_lines:
         header_block = "\n".join(upload_summary_lines)
         stored_user_content = f"{header_block}\n\n{message}" if message else header_block
 
-    # ---------------------------------------------------------
-    # 2. DATABASE OPERATIONS
-    # ---------------------------------------------------------
+    # 2. SAVE USER MESSAGE TO SQLITE
     conn = get_db_connection()
     c = conn.cursor()
     now_str = datetime.datetime.now().isoformat(sep=' ')
@@ -1114,14 +1113,7 @@ def generate():
     )
     conn.commit()
 
-    if is_new_chat and message:
-        async_generate_chat_title(chat_id, message)
-
-    # ---------------------------------------------------------
-    # 3. MEMORY COMPACTION & HISTORY RETRIEVAL
-    # ---------------------------------------------------------
-    compact_chat_memory(chat_id)
-
+    # 3. FETCH SUMMARY & RECENT CONTEXT (NO EXTRA MODEL CALLS BEFORE STREAM!)
     c.execute("SELECT summary FROM chat_summaries WHERE chat_id = ?", (chat_id,))
     summary_row = c.fetchone()
     active_summary = summary_row["summary"] if summary_row else None
@@ -1146,13 +1138,8 @@ def generate():
     )
 
     history = []
-    rows = c.fetchall()
-    for idx, row in enumerate(rows):
-        msg_obj = {
-            "role": row["role"],
-            "content": row["content"]
-        }
-        # Re-attach previous images in recent context if present
+    for row in c.fetchall():
+        msg_obj = {"role": row["role"], "content": row["content"]}
         if row["images"]:
             try:
                 stored_uris = json.loads(row["images"])
@@ -1169,16 +1156,12 @@ def generate():
 
     conn.close()
 
-    # Replace the latest user message content with the full prompt_for_ai
-    # and attach the normalized raw base64 images for Ollama
     if history and history[-1]["role"] == "user":
         history[-1]["content"] = prompt_for_ai
         if ollama_images:
             history[-1]["images"] = ollama_images
 
-    # ---------------------------------------------------------
-    # 4. SYSTEM PROMPT & WEB SEARCH
-    # ---------------------------------------------------------
+    # 4. SYSTEM PROMPT & SMART WEB SEARCH (USES primary_model TO PREVENT VRAM SWAP)
     current_time = datetime.datetime.now(
         ZoneInfo('America/Vancouver')
     ).strftime("%I:%M %p on %A, %B %d, %Y")
@@ -1192,35 +1175,27 @@ def generate():
     if active_summary:
         base_system_content += f"\n\n[Memory of earlier conversation: {active_summary}]"
 
-    # Run web search only if not disabled and there's an actual text prompt
     web_context = ""
     if not disable_search and message:
-        web_context = fetch_internet_context(message, "DWS:Swift", force_search=force_search)
+        web_context = fetch_internet_context(message, primary_model, force_search=force_search)
 
     if web_context and history and history[-1]["role"] == "user":
         existing_text = history[-1].get("content", "")
         history[-1]["content"] = f"{web_context}\n\nUser's Prompt: {existing_text}"
 
-    # ---------------------------------------------------------
     # 5. BUILD CANDIDATE MODEL FAILOVER CHAIN
-    # ---------------------------------------------------------
-    # Build ordered list: [primary_model, ...backups]
     candidate_models = [primary_model]
     for b_model in FALLBACK_CHAIN.get(primary_model, ["DWS:Swift", "DWS:Avani", "DWS:Optic"]):
         if b_model not in candidate_models:
             candidate_models.append(b_model)
 
-    # If images are attached and DWS:Optic is not first, prioritize DWS:Optic as the #1 backup
     if has_images and "DWS:Optic" in candidate_models and candidate_models[0] != "DWS:Optic":
         candidate_models.remove("DWS:Optic")
         candidate_models.insert(1, "DWS:Optic")
 
-    # ---------------------------------------------------------
-    # 6. STREAM GENERATOR WITH UPLOAD PREVIEW, HEARTBEATS & FAILOVER
-    # ---------------------------------------------------------
+    # 6. STREAM GENERATOR WITH CUDA RECOVERY & DIRECT BACKUP REPLY
     def generate_stream():
         try:
-            # 1) Start event
             yield json.dumps({
                 "type": "start",
                 "chat_id": chat_id,
@@ -1229,7 +1204,6 @@ def generate():
                 "images": preview_data_uris
             }) + "\n"
 
-            # 2) Clear visual confirmation in the stream when pictures or files are uploaded
             if preview_data_uris or attachment_metas:
                 yield json.dumps({
                     "type": "attachments_received",
@@ -1237,8 +1211,6 @@ def generate():
                     "attachments": attachment_metas
                 }) + "\n"
 
-                # Emit a clean visual acknowledgment header so even a basic frontend
-                # that only renders 'chunk' text shows the uploaded picture & file details
                 ack_lines = []
                 for idx, uri in enumerate(preview_data_uris):
                     meta = attachment_metas[idx] if idx < len(attachment_metas) else {"name": f"Image {idx+1}", "size_kb": "?"}
@@ -1257,7 +1229,6 @@ def generate():
                         "content": "".join(ack_lines) + "---\n\n"
                     }) + "\n"
 
-            # 3) Iterate through primary model + backup failover models
             full_ai_message = ""
             successful_model = None
             used_backup = False
@@ -1268,21 +1239,18 @@ def generate():
                 is_backup_attempt = attempt_idx > 0
                 attempt_messages = [dict(m) for m in history]
 
-                # Construct system prompt (inject explicit backup notice if failing over)
                 sys_text = base_system_content
                 if is_backup_attempt:
-                    last_fail_reason = failure_reasons[-1] if failure_reasons else "unresponsive"
+                    # Direct instruction so the backup AI responds directly to the user's message
+                    # instead of asking "Please provide your original request"
                     sys_text += (
-                        f"\n\n[SYSTEM FAILOVER DIRECTIVE: The user originally requested '{primary_model}', "
-                        f"but it failed to respond ({last_fail_reason}). You are '{current_model}', "
-                        f"responding as the automatic backup AI. Begin your response with a brief 1-sentence "
-                        f"note letting the user know you ({current_model}) are stepping in as the backup AI "
-                        f"because {primary_model} was unavailable, then answer their request completely.]"
+                        f"\n\n[Note: You are {current_model} responding because {primary_model} was offline. "
+                        f"Reply directly and naturally to the user's message ('{prompt_for_ai[:200]}') right now. "
+                        f"Do NOT ask the user to repeat or provide their original request.]"
                     )
 
                 attempt_messages.insert(0, {"role": "system", "content": sys_text})
 
-                # If this is a backup attempt, notify the frontend immediately
                 if is_backup_attempt:
                     prev_model = candidate_models[attempt_idx - 1]
                     reason_str = failure_reasons[-1]
@@ -1298,51 +1266,68 @@ def generate():
                     yield json.dumps({
                         "type": "chunk",
                         "content": (
-                            f"\n> ⚠️ **[{prev_model} unavailable: {reason_str}. "
-                            f"Switching to backup AI `{current_model}`...]**\n\n"
+                            f"\n> 🔄 **[`{prev_model}` hit a VRAM/server error — "
+                            f"automatically responding via backup AI `{current_model}`]**\n\n"
                         )
                     }) + "\n"
 
-                attempt_buffer = ""
-                attempt_error = None
-                heartbeat_shown = False
+                # Try streaming (and if it hits a CUDA/VRAM crash on the primary model,
+                # unload idle models in VRAM and retry once with safe_low_vram=True)
+                for retry_pass in (1, 2):
+                    attempt_buffer = ""
+                    attempt_error = None
+                    heartbeat_shown = False
+                    use_low_vram = (retry_pass == 2) or is_backup_attempt
 
-                for evt_type, evt_data in stream_from_ollama_with_timeout(
-                    current_model, attempt_messages, temperature=temperature
-                ):
-                    if evt_type == "heartbeat":
-                        elapsed_s = evt_data
-                        # Send a status packet for UIs that listen for 'status'
-                        yield json.dumps({
-                            "type": "status",
-                            "model": current_model,
-                            "elapsed": elapsed_s,
-                            "content": f"Waiting for {current_model} to respond ({elapsed_s}s elapsed)..."
-                        }) + "\n"
-
-                        # Also emit a one-time inline notice if taking longer than 8s
-                        if elapsed_s >= 8 and not heartbeat_shown:
-                            heartbeat_shown = True
+                    for evt_type, evt_data in stream_from_ollama_with_timeout(
+                        current_model,
+                        attempt_messages,
+                        temperature=temperature,
+                        safe_low_vram=use_low_vram
+                    ):
+                        if evt_type == "heartbeat":
+                            elapsed_s = evt_data
                             yield json.dumps({
-                                "type": "chunk",
-                                "content": f"*(⏳ `{current_model}` is warming up / loading into VRAM...)*\n\n"
+                                "type": "status",
+                                "model": current_model,
+                                "elapsed": elapsed_s,
+                                "content": f"Waiting for {current_model} ({elapsed_s}s elapsed)..."
                             }) + "\n"
 
-                    elif evt_type == "token":
-                        attempt_buffer += evt_data
-                        yield json.dumps({
-                            "type": "chunk",
-                            "content": evt_data
-                        }) + "\n"
+                            if elapsed_s >= 8 and not heartbeat_shown:
+                                heartbeat_shown = True
+                                yield json.dumps({
+                                    "type": "chunk",
+                                    "content": f"*(⏳ `{current_model}` is warming up / loading into VRAM...)*\n\n"
+                                }) + "\n"
 
-                    elif evt_type == "done":
-                        final_metrics = evt_data or {}
+                        elif evt_type == "token":
+                            attempt_buffer += evt_data
+                            yield json.dumps({
+                                "type": "chunk",
+                                "content": evt_data
+                            }) + "\n"
 
-                    elif evt_type == "error":
-                        attempt_error = evt_data
+                        elif evt_type == "done":
+                            final_metrics = evt_data or {}
+
+                        elif evt_type == "error":
+                            attempt_error = evt_data
+                            break
+
+                    # If retry_pass 1 failed with a CUDA / 0xc0000409 / 500 error, free VRAM and retry once!
+                    if (
+                        retry_pass == 1
+                        and attempt_error
+                        and any(k in attempt_error for k in ("CUDA", "0xc0000409", "HTTP 500", "terminated"))
+                    ):
+                        print(f"[*] CUDA/VRAM crash detected on {current_model}. Purging other models from VRAM and retrying with safe context...")
+                        free_other_models_in_vram(current_model)
+                        time.sleep(0.5)
+                        continue
+                    else:
                         break
 
-                # Check if the model succeeded and actually produced non-empty text
                 if not attempt_error and attempt_buffer.strip():
                     full_ai_message = attempt_buffer
                     successful_model = current_model
@@ -1354,7 +1339,6 @@ def generate():
                     failure_reasons.append(attempt_error)
                     print(f"[!] Model '{current_model}' failed: {attempt_error}")
 
-            # 4) Handle total failure if ALL models in the failover chain failed
             if not successful_model:
                 combined_errors = " | ".join(failure_reasons)
                 err_msg = (
@@ -1362,10 +1346,7 @@ def generate():
                     f"Tried: `{', '.join(candidate_models)}`\n"
                     f"Details: {combined_errors}"
                 )
-                yield json.dumps({
-                    "type": "chunk",
-                    "content": f"\n{err_msg}\n"
-                }) + "\n"
+                yield json.dumps({"type": "chunk", "content": f"\n{err_msg}\n"}) + "\n"
                 yield json.dumps({
                     "type": "error",
                     "content": err_msg,
@@ -1374,7 +1355,7 @@ def generate():
                 }) + "\n"
                 return
 
-            # 5) Save the completed AI response to SQLite
+            # Save the completed AI response
             save_conn = get_db_connection()
             save_c = save_conn.cursor()
             save_c.execute(
@@ -1395,6 +1376,9 @@ def generate():
             )
             save_conn.commit()
             save_conn.close()
+
+            # Run title generation & memory compaction AFTER stream finishes using the ALREADY loaded model
+            run_post_stream_tasks(chat_id, is_new_chat, message, successful_model)
 
             print(
                 f"Successfully finished streaming response via {successful_model} "
@@ -1425,16 +1409,8 @@ def generate():
         }
     )
 
-# ---------------------------------------------------------
-# MESSAGE REGENERATION & EDITING ENDPOINTS
-# ---------------------------------------------------------
-
 @app.route('/api/regenerate/<chat_id>', methods=['POST'])
 def regenerate_last_response(chat_id):
-    """
-    Deletes the last assistant message in a chat and returns the last user message
-    so the frontend can immediately re-trigger /api/generate (or switch models).
-    """
     conn = get_db_connection()
     c = conn.cursor()
 
