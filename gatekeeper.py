@@ -277,7 +277,7 @@ def verify_access():
         print("[Gatekeeper] 4. Access GRANTED.", flush=True)
         response = jsonify({
             "authorized": True,
-            "dashboard_url": "https://dashboard-rfdtq2xvdwq.teamexist.com",
+            "dashboard_url": "https://cloud.teamexist.com",
             "debug": {
                 "cookie_received": has_cookie,
                 "origin_seen": origin,
