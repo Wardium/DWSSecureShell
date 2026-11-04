@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 # Define your allowed whitelist
 ALLOWED_ORIGINS = [
     "https://teamexist.com",
-    "https://www.teamexist.com"
+    "https://www.teamexist.com",
+    "https://cloud.teamexist.com"
 ]
 
 
