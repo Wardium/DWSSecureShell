@@ -237,5 +237,16 @@
             }
         }
     </script>
+
+    <script>
+      let loginSubmitted = false;
+      document.querySelector('form')?.addEventListener('submit', () => { loginSubmitted = true; });
+      window.addEventListener('pagehide', () => {
+        if (!loginSubmitted && navigator.sendBeacon) {
+          navigator.sendBeacon('/api/login_leave');
+        }
+      });
+    </script>
+    
 </body>
 </html>
