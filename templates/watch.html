@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HomeBase // Gatekeeper Watch</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #000000;
+      font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      color: #ffffff;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: crosshair;
+    }
+
+    /* Minimal passive telemetry overlay (zero buttons/options) */
+    .hud-top-left {
+      position: fixed;
+      top: 20px;
+      left: 24px;
+      pointer-events: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      color: rgba(255, 255, 255, 0.42);
+      text-transform: uppercase;
+    }
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #00ff88;
+      box-shadow: 0 0 8px #00ff88;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .pulse-dot.offline {
+      background: #ff2244;
+      box-shadow: 0 0 8px #ff2244;
+    }
+
+    .hud-top-right {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      pointer-events: none;
+      display: flex;
+      gap: 22px;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: rgba(255, 255, 255, 0.38);
+    }
+    .stat-item span {
+      color: rgba(255, 255, 255, 0.85);
+      font-weight: 600;
+      margin-left: 4px;
+    }
+
+    .hud-bottom-left {
+      position: fixed;
+      bottom: 20px;
+      left: 24px;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 5px;
+      max-width: 520px;
+    }
+    .feed-line {
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: rgba(255, 255, 255, 0.5);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      animation: fadeIn 0.25s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Hover Inspection Popup */
+    #tooltip {
+      position: fixed;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(-50%, -115%);
+      background: rgba(6, 6, 9, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      padding: 12px 14px;
+      min-width: 255px;
+      max-width: 340px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.9), 0 0 18px rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(8px);
+      transition: opacity 0.12s ease;
+      z-index: 50;
+    }
+    #tooltip.visible {
+      opacity: 1;
+    }
+    .tt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      gap: 10px;
+    }
+    .tt-ip {
+      font-size: 13px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.04em;
+    }
+    .tt-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      padding: 2px 6px;
+      text-transform: uppercase;
+      border: 1px solid currentColor;
+    }
+    .tt-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      line-height: 1.55;
+      gap: 12px;
+    }
+    .tt-label {
+      color: rgba(255, 255, 255, 0.42);
+      flex-shrink: 0;
+    }
+    .tt-val {
+      color: rgba(255, 255, 255, 0.9);
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="hud-top-left">
+    <div id="connDot" class="pulse-dot"></div>
+    <span id="connText">AUTH.TEAMEXIST.COM // LIVE TELEMETRY</span>
+  </div>
+
+  <div class="hud-top-right">
+    <div class="stat-item">INSIDE<span id="statInside">0</span></div>
+    <div class="stat-item">LOCK SCREEN<span id="statWaiting">0</span></div>
+    <div class="stat-item">ATTEMPTS<span id="statAttempts">0</span></div>
+    <div class="stat-item">BANNED<span id="statBanned">0</span></div>
+  </div>
+
+  <div class="hud-bottom-left" id="eventFeed"></div>
+
+  <div id="tooltip">
+    <div class="tt-header">
+      <span class="tt-ip" id="ttIp">--</span>
+      <span class="tt-badge" id="ttBadge">--</span>
+    </div>
+    <div class="tt-row"><span class="tt-label">Location</span><span class="tt-val" id="ttLoc">--</span></div>
+    <div class="tt-row"><span class="tt-label">Route</span><span class="tt-val" id="ttRoute">--</span></div>
+    <div class="tt-row"><span class="tt-label">Detail</span><span class="tt-val" id="ttDetail">--</span></div>
+    <div class="tt-row"><span class="tt-label">Device</span><span class="tt-val" id="ttDevice">--</span></div>
+    <div class="tt-row"><span class="tt-label">Timestamp</span><span class="tt-val" id="ttTime">--</span></div>
+  </div>
+
+  <canvas id="stage"></canvas>
+
+  <script>
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d');
+
+    let W = window.innerWidth;
+    let H = window.innerHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    // Central HomeBase square geometry
+    const hb = {
+      x: W / 2,
+      y: H / 2,
+      size: 240,
+      shakeX: 0,
+      shakeY: 0,
+      shakeVX: 0,
+      shakeVY: 0,
+      greenGlow: 0,
+      redGlow: 0,
+      gateSide: null, // 'top', 'bottom', 'left', 'right'
+      gatePos: 0,
+      gateOpen: 0
+    };
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      canvas.width = W * dpr;
+      canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      hb.x = W / 2;
+      hb.y = H / 2;
+      hb.size = Math.max(200, Math.min(280, Math.min(W, H) * 0.28));
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // 4 Corner Cloud Centers (leaves clean space around HomeBase and screen edges)
+    function getCornerAnchor(cornerIdx) {
+      const padX = Math.max(130, W * 0.14);
+      const padY = Math.max(120, H * 0.16);
+      switch (cornerIdx % 4) {
+        case 0: return { x: padX, y: padY };
+        case 1: return { x: W - padX, y: padY };
+        case 2: return { x: W - padX, y: H - padY };
+        case 3: return { x: padX, y: H - padY };
+      }
+    }
+
+    // Entity Registry & Ambient Corner Cloud Nodes
+    // States: 'CLOUD', 'FLYING_IN', 'WAITING_LOCK', 'ENTERING', 'INSIDE', 'REJECTED_OUT'
+    const squares = [];
+    const entityByKey = new Map(); // Maps IP or Session Key -> Square object
+    const particles = [];
+    const shockwaves = [];
+
+    // Create 36 ambient corner-cloud squares (9 in each of the 4 corners)
+    // These spin freely and bump into each other in the corners.
+    // When a new real IP connects, it claims one of these squares!
+    const AMBIENT_COUNT = 36;
+    for (let i = 0; i < AMBIENT_COUNT; i++) {
+      const corner = i % 4;
+      const anchor = getCornerAnchor(corner);
+      const angle = (i / (AMBIENT_COUNT / 4)) * Math.PI * 2 + Math.random() * 0.5;
+      const radius = 28 + Math.random() * 68;
+      squares.push({
+        id: `ambient_${i}`,
+        key: null, // Unclaimed until a real IP claims it
+        isClaimed: false,
+        state: 'CLOUD',
+        corner,
+        orbitRadius: radius,
+        orbitAngle: angle,
+        orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * (0.004 + Math.random() * 0.006),
+        x: anchor.x + Math.cos(angle) * radius,
+        y: anchor.y + Math.sin(angle) * radius,
+        vx: (Math.random() - 0.5) * 0.8,
+        vy: (Math.random() - 0.5) * 0.8,
+        size: 11,
+        angle: Math.random() * Math.PI * 2,
+        vAngle: (Math.random() - 0.5) * 0.06,
+        color: '#8892b0',
+        trail: [],
+        pulse: 0,
+        // Metadata
+        ip: 'Unassigned Node',
+        badge: 'CLOUD IDLE',
+        badgeColor: '#64748b',
+        location: 'Outer Perimeter Cloud',
+        route: 'Awaiting Traffic',
+        detail: 'Orbiting corner cloud',
+        device: '--',
+        time: '--',
+        sessionId: ''
+      });
+    }
+
+    function claimOrGetSquare(key, ip, preferInside = false) {
+      if (entityByKey.has(key)) {
+        return entityByKey.get(key);
+      }
+      // Also check if there is already an entity for this raw IP
+      if (entityByKey.has(ip)) {
+        const sq = entityByKey.get(ip);
+        entityByKey.set(key, sq);
+        sq.key = key;
+        return sq;
+      }
+
+      // Claim an unclaimed ambient square in the corner cloud
+      let candidate = squares.find(s => !s.isClaimed && s.state === 'CLOUD');
+      if (!candidate) {
+        const corner = squares.length % 4;
+        const anchor = getCornerAnchor(corner);
+        candidate = {
+          id: `real_${Date.now()}_${Math.random()}`,
+          key,
+          isClaimed: true,
+          state: preferInside ? 'INSIDE' : 'CLOUD',
+          corner,
+          orbitRadius: 35 + Math.random() * 60,
+          orbitAngle: Math.random() * Math.PI * 2,
+          orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * 0.006,
+          x: preferInside ? hb.x + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.x,
+          y: preferInside ? hb.y + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.y,
+          vx: (Math.random() - 0.5) * 1.2,
+          vy: (Math.random() - 0.5) * 1.2,
+          size: 12,
+          angle: Math.random() * Math.PI * 2,
+          vAngle: (Math.random() - 0.5) * 0.07,
+          color: '#ffffff',
+          trail: [],
+          pulse: 0,
+          ip,
+          badge: 'KNOWN IP',
+          badgeColor: '#94a3b8',
+          location: 'Unknown Location',
+          route: '--',
+          detail: '--',
+          device: '--',
+          time: '--',
+          sessionId: ''
+        };
+        squares.push(candidate);
+      } else {
+        candidate.isClaimed = true;
+        candidate.key = key;
+        candidate.ip = ip;
+        if (preferInside) {
+          candidate.state = 'INSIDE';
+          candidate.x = hb.x + (Math.random() - 0.5) * (hb.size * 0.65);
+          candidate.y = hb.y + (Math.random() - 0.5) * (hb.size * 0.65);
+          candidate.vx = (Math.random() - 0.5) * 1.1;
+          candidate.vy = (Math.random() - 0.5) * 1.1;
+        }
+      }
+
+      entityByKey.set(key, candidate);
+      entityByKey.set(ip, candidate);
+      return candidate;
+    }
+
+    // Pick closest point on the outer edge of HomeBase for a square to fly to
+    function getHomeBaseEdgeTarget(sq) {
+      const half = hb.size / 2;
+      const dx = sq.x - hb.x;
+      const dy = sq.y - hb.y;
+      const pad = sq.size + 6;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        const side = dx > 0 ? 'right' : 'left';
+        const tx = hb.x + (dx > 0 ? half + pad : -half - pad);
+        const ty = hb.y + Math.max(-half + 24, Math.min(half - 24, dy * 0.35));
+        return { x: tx, y: ty, side, gatePos: ty - hb.y };
+      } else {
+        const side = dy > 0 ? 'bottom' : 'top';
+        const tx = hb.x + Math.max(-half + 24, Math.min(half - 24, dx * 0.35));
+        const ty = hb.y + (dy > 0 ? half + pad : -half - pad);
+        return { x: tx, y: ty, side, gatePos: tx - hb.x };
+      }
+    }
+
+    function spawnSparks(x, y, color, count = 18) {
+      for (let i = 0; i < count; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const spd = 1.5 + Math.random() * 5.5;
+        particles.push({
+          x,
+          y,
+          vx: Math.cos(a) * spd,
+          vy: Math.sin(a) * spd,
+          life: 1,
+          decay: 0.022 + Math.random() * 0.025,
+          color,
+          size: 2 + Math.random() * 2.5
+        });
+      }
+    }
+
+    function triggerGreenPass(sq, targetInfo) {
+      hb.greenGlow = 1.0;
+      if (targetInfo) {
+        hb.gateSide = targetInfo.side;
+        hb.gatePos = targetInfo.gatePos;
+        hb.gateOpen = 1.0;
+      }
+      shockwaves.push({
+        x: hb.x,
+        y: hb.y,
+        size: hb.size,
+        alpha: 0.75,
+        color: '#00ff88'
+      });
+      spawnSparks(sq.x, sq.y, '#00ff88', 14);
+    }
+
+    function triggerRedReject(sq) {
+      hb.redGlow = 1.0;
+      // Sharp recoil impulse on HomeBase
+      const angle = Math.atan2(hb.y - sq.y, hb.x - sq.x);
+      hb.shakeVX += Math.cos(angle) * 15 + (Math.random() - 0.5) * 10;
+      hb.shakeVY += Math.sin(angle) * 15 + (Math.random() - 0.5) * 10;
+
+      shockwaves.push({
+        x: hb.x,
+        y: hb.y,
+        size: hb.size,
+        alpha: 0.85,
+        color: '#ff2244'
+      });
+      spawnSparks(sq.x, sq.y, '#ff2244', 24);
+
+      // Fling the rejected square back toward its corner cloud with fast spin
+      sq.state = 'REJECTED_OUT';
+      sq.color = '#ff2244';
+      sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.28;
+      const anchor = getCornerAnchor(sq.corner);
+      const backAngle = Math.atan2(anchor.y - sq.y, anchor.x - sq.x);
+      sq.vx = Math.cos(backAngle) * 8.5;
+      sq.vy = Math.sin(backAngle) * 8.5;
+    }
+
+    // Event Feed Log (Bottom-Left)
+    const feedEl = document.getElementById('eventFeed');
+    function pushFeedLine(ev) {
+      const div = document.createElement('div');
+      div.className = 'feed-line';
+      let color = '#94a3b8';
+      if (['LOGIN_SUCCESS', 'AUTH_OK', 'VERIFY_OK', 'ADMIN_ALLOW'].includes(ev.type)) color = '#00ff88';
+      else if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) color = '#ff3355';
+      else if (['LOCK_WAIT', 'LOCK_ABANDON'].includes(ev.type)) color = '#ffbe0b';
+
+      const timeOnly = (ev.time || '').split(' ')[1] || ev.time;
+      div.innerHTML = `<span style="color:rgba(255,255,255,0.35)">[${timeOnly}]</span> <span style="color:${color};font-weight:700">${ev.type}</span> <span style="color:#fff">${ev.ip}</span> <span style="color:rgba(255,255,255,0.45)">${ev.route} — ${ev.detail || ''}</span>`;
+      feedEl.prepend(div);
+      while (feedEl.children.length > 5) {
+        feedEl.removeChild(feedEl.lastChild);
+      }
+    }
+
+    // Handle a real event emitted by gatekeeper.py
+    function handleRealEvent(ev) {
+      pushFeedLine(ev);
+      const key = ev.session_id || ev.ip;
+      const sq = claimOrGetSquare(key, ev.ip, false);
+
+      sq.ip = ev.ip;
+      sq.location = ev.location || sq.location;
+      sq.route = ev.route || sq.route;
+      sq.detail = ev.detail || sq.detail;
+      sq.device = ev.device_info || sq.device;
+      sq.time = ev.time || sq.time;
+      if (ev.session_id) sq.sessionId = ev.session_id;
+
+      // If the square is already INSIDE and hits /auth or /api/verify or /api/status with 200 OK
+      if (sq.state === 'INSIDE' && ['AUTH_OK', 'VERIFY_OK'].includes(ev.type)) {
+        sq.pulse = 1.0;
+        sq.color = '#00ff88';
+        sq.badge = 'ACTIVE SESSION';
+        sq.badgeColor = '#00ff88';
+        hb.greenGlow = Math.max(hb.greenGlow, 0.55);
+        spawnSparks(sq.x, sq.y, '#00ff88', 8);
+        return;
+      }
+
+      // If visitor opened GET /login -> Fly to the edge of HomeBase and wait there
+      if (ev.type === 'LOCK_WAIT') {
+        const edge = getHomeBaseEdgeTarget(sq);
+        sq.targetX = edge.x;
+        sq.targetY = edge.y;
+        sq.targetSide = edge.side;
+        sq.targetGatePos = edge.gatePos;
+        sq.afterFlight = 'WAIT_AT_LOCK';
+        sq.state = 'FLYING_IN';
+        sq.color = '#ffbe0b';
+        sq.badge = 'AT LOCK SCREEN';
+        sq.badgeColor = '#ffbe0b';
+        return;
+      }
+
+      // If visitor closed the lock screen or timed out -> Fly away back to corner cloud
+      if (ev.type === 'LOCK_ABANDON') {
+        sq.badge = 'LEFT LOCK SCREEN';
+        sq.badgeColor = '#94a3b8';
+        sq.state = 'REJECTED_OUT';
+        sq.color = '#94a3b8';
+        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.14;
+        return;
+      }
+
+      // If user logged out or admin revoked/banned them while inside -> Eject from HomeBase
+      if (['LOGOUT', 'REVOKE', 'ADMIN_BAN'].includes(ev.type)) {
+        sq.badge = ev.type === 'ADMIN_BAN' ? 'BANNED IP' : 'DISCONNECTED';
+        sq.badgeColor = ev.type === 'ADMIN_BAN' ? '#ff2244' : '#94a3b8';
+        sq.color = ev.type === 'ADMIN_BAN' ? '#ff2244' : '#94a3b8';
+        sq.state = 'REJECTED_OUT';
+        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.2;
+        if (ev.type === 'ADMIN_BAN') {
+          hb.redGlow = 0.8;
+          spawnSparks(sq.x, sq.y, '#ff2244', 16);
+        }
+        return;
+      }
+
+      // Allowed in (LOGIN_SUCCESS, AUTH_OK, VERIFY_OK, ADMIN_ALLOW)
+      if (['LOGIN_SUCCESS', 'AUTH_OK', 'VERIFY_OK', 'ADMIN_ALLOW'].includes(ev.type)) {
+        const edge = getHomeBaseEdgeTarget(sq);
+        sq.targetX = edge.x;
+        sq.targetY = edge.y;
+        sq.targetSide = edge.side;
+        sq.targetGatePos = edge.gatePos;
+        sq.afterFlight = 'ALLOW_IN';
+        sq.badge = 'AUTHORIZED';
+        sq.badgeColor = '#00ff88';
+        sq.color = '#00ff88';
+
+        // If already waiting right at the lock screen edge, enter immediately!
+        if (sq.state === 'WAITING_LOCK') {
+          triggerGreenPass(sq, { side: sq.targetSide, gatePos: sq.targetGatePos });
+          sq.state = 'ENTERING';
+        } else {
+          sq.state = 'FLYING_IN';
+        }
+        return;
+      }
+
+      // Rejected (REJECT, LOGIN_FAIL, VERIFY_FAIL)
+      if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL'].includes(ev.type)) {
+        const edge = getHomeBaseEdgeTarget(sq);
+        sq.targetX = edge.x;
+        sq.targetY = edge.y;
+        sq.targetSide = edge.side;
+        sq.targetGatePos = edge.gatePos;
+        sq.afterFlight = 'REJECT_OUT';
+        sq.badge = ev.status === 403 ? 'BANNED (403)' : 'BLOCKED (401)';
+        sq.badgeColor = '#ff2244';
+
+        // If waiting at the lock screen edge and typed the wrong password, shake & reject immediately!
+        if (sq.state === 'WAITING_LOCK') {
+          triggerRedReject(sq);
+        } else {
+          sq.color = '#ffaa00';
+          sq.state = 'FLYING_IN';
+        }
+      }
+    }
+
+    // Reconcile full snapshot from /api/telemetry with visual entities
+    let lastEventId = 0;
+    let firstSync = true;
+
+    async function pollTelemetry() {
+      try {
+        const res = await fetch(`/api/telemetry?since=${lastEventId}`, { credentials: 'include' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        document.getElementById('connDot').classList.remove('offline');
+
+        const activeSessions = data.active_sessions || {};
+        const allowedIps = data.allowed_ips || {};
+        const pendingLogins = data.pending_logins || {};
+        const attempts = data.attempts || {};
+        const bannedIps = data.banned_ips || {};
+        const knownIps = data.known_ips || {};
+
+        // Update top-right counters
+        const insideCount = Object.keys(activeSessions).length + Object.keys(allowedIps).length;
+        document.getElementById('statInside').textContent = insideCount;
+        document.getElementById('statWaiting').textContent = Object.keys(pendingLogins).length;
+        document.getElementById('statAttempts').textContent = Object.keys(attempts).length;
+        document.getElementById('statBanned').textContent = Object.keys(bannedIps).length;
+
+        if (firstSync) {
+          // On initial page load, place all currently active sessions & whitelisted IPs inside HomeBase
+          for (const [sessId, info] of Object.entries(activeSessions)) {
+            const sq = claimOrGetSquare(sessId, info.ip || 'Session', true);
+            sq.state = 'INSIDE';
+            sq.color = '#00ff88';
+            sq.badge = 'ACTIVE SESSION';
+            sq.badgeColor = '#00ff88';
+            sq.location = info.location || 'Unknown';
+            sq.device = info.device_info || '--';
+            sq.time = info.last_seen || info.time || '--';
+            sq.route = info.last_uri || '/auth';
+            sq.detail = `Session ${sessId.slice(0, 8)}...`;
+            sq.sessionId = sessId;
+          }
+
+          for (const [ip, info] of Object.entries(allowedIps)) {
+            const sq = claimOrGetSquare(`allow_${ip}`, ip, true);
+            sq.state = 'INSIDE';
+            sq.color = '#00e5ff';
+            sq.badge = 'WHITELISTED IP';
+            sq.badgeColor = '#00e5ff';
+            sq.location = 'Whitelisted';
+            sq.detail = info.name || 'Allowed IP';
+            sq.time = info.time || '--';
+            sq.route = '/auth';
+          }
+
+          // Place any currently waiting lock-screen visitors on the HomeBase perimeter
+          for (const [ip, info] of Object.entries(pendingLogins)) {
+            const sq = claimOrGetSquare(ip, ip, false);
+            const edge = getHomeBaseEdgeTarget(sq);
+            sq.x = edge.x;
+            sq.y = edge.y;
+            sq.targetX = edge.x;
+            sq.targetY = edge.y;
+            sq.state = 'WAITING_LOCK';
+            sq.color = '#ffbe0b';
+            sq.badge = 'AT LOCK SCREEN';
+            sq.badgeColor = '#ffbe0b';
+            sq.location = info.location || 'Unknown';
+            sq.device = info.device_info || '--';
+            sq.time = info.time || '--';
+            sq.route = '/login';
+            sq.detail = 'Waiting for password input';
+          }
+
+          // Populate outer corner clouds with real attempts, banned IPs, and known IPs
+          for (const [ip, info] of Object.entries(knownIps)) {
+            if (!entityByKey.has(ip)) {
+              const sq = claimOrGetSquare(ip, ip, false);
+              sq.location = info.location || 'Unknown';
+              sq.device = info.device_info || '--';
+              sq.route = info.last_route || '--';
+              sq.time = info.last_seen || '--';
+              sq.badge = 'RECENT VISITOR';
+              sq.badgeColor = '#94a3b8';
+            }
+          }
+
+          for (const [ip, info] of Object.entries(attempts)) {
+            const sq = claimOrGetSquare(ip, ip, false);
+            if (sq.state === 'CLOUD') {
+              sq.color = '#ff5566';
+              sq.badge = `ATTEMPTS (${info.count})`;
+              sq.badgeColor = '#ff5566';
+              sq.location = info.location || sq.location;
+              sq.time = info.time || sq.time;
+              sq.detail = `${info.count} failed attempt(s)`;
+            }
+          }
+
+          for (const [ip, info] of Object.entries(bannedIps)) {
+            const sq = claimOrGetSquare(ip, ip, false);
+            if (sq.state === 'CLOUD') {
+              sq.color = '#ff2244';
+              sq.badge = 'BANNED IP';
+              sq.badgeColor = '#ff2244';
+              sq.time = info.time || '--';
+              sq.detail = 'Banned by Gatekeeper';
+            }
+          }
+
+          // Show the last 4 historical events in the bottom-left ticker without re-animating old flights
+          const recent = (data.events || []).slice(-4);
+          recent.forEach(pushFeedLine);
+          lastEventId = data.last_event_id || 0;
+          firstSync = false;
+        } else {
+          // Process new real-time events
+          const newEvents = data.events || [];
+          for (const ev of newEvents) {
+            if (ev.id > lastEventId) {
+              lastEventId = ev.id;
+              handleRealEvent(ev);
+            }
+          }
+        }
+      } catch (err) {
+        document.getElementById('connDot').classList.add('offline');
+      }
+    }
+
+    setInterval(pollTelemetry, 1000);
+    pollTelemetry();
+
+    // Mouse Hover Tracking
+    const mouse = { x: -9999, y: -9999 };
+    let hoveredSquare = null;
+    const tooltip = document.getElementById('tooltip');
+
+    window.addEventListener('mousemove', (e) => {
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+    });
+    window.addEventListener('mouseleave', () => {
+      mouse.x = -9999;
+      mouse.y = -9999;
+    });
+
+    // 2D Elastic Square-to-Square Collision + Spin Transfer
+    function resolveCollisions(group) {
+      for (let i = 0; i < group.length; i++) {
+        for (let j = i + 1; j < group.length; j++) {
+          const a = group[i];
+          const b = group[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const minDist = (a.size + b.size) * 0.78;
+          const distSq = dx * dx + dy * dy;
+          if (distSq > 0 && distSq < minDist * minDist) {
+            const dist = Math.sqrt(distSq);
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const overlap = (minDist - dist) * 0.5;
+            a.x -= nx * overlap;
+            a.y -= ny * overlap;
+            b.x += nx * overlap;
+            b.y += ny * overlap;
+
+            // Exchange velocity along collision normal
+            const kx = a.vx - b.vx;
+            const ky = a.vy - b.vy;
+            const p = kx * nx + ky * ny;
+            if (p > 0) {
+              a.vx -= p * nx * 0.85;
+              a.vy -= p * ny * 0.85;
+              b.vx += p * nx * 0.85;
+              b.vy += p * ny * 0.85;
+
+              // Impart free angular spin when squares bump corners
+              const spinKick = (Math.random() - 0.5) * 0.09;
+              a.vAngle = Math.max(-0.22, Math.min(0.22, a.vAngle + spinKick));
+              b.vAngle = Math.max(-0.22, Math.min(0.22, b.vAngle - spinKick));
+            }
+          }
+        }
+      }
+    }
+
+    function updatePhysics() {
+      // Damped spring physics for HomeBase red rejection shake
+      const springK = 0.28;
+      const damping = 0.72;
+      hb.shakeVX = (hb.shakeVX - hb.shakeX * springK) * damping;
+      hb.shakeVY = (hb.shakeVY - hb.shakeY * springK) * damping;
+      hb.shakeX += hb.shakeVX;
+      hb.shakeY += hb.shakeVY;
+
+      hb.greenGlow = Math.max(0, hb.greenGlow - 0.022);
+      hb.redGlow = Math.max(0, hb.redGlow - 0.025);
+      hb.gateOpen = Math.max(0, hb.gateOpen - 0.03);
+
+      const half = hb.size / 2;
+      const innerPad = 14;
+
+      hoveredSquare = null;
+      let minHoverDist = 24;
+
+      for (const sq of squares) {
+        // Check hover proximity
+        const dMouse = Math.hypot(mouse.x - sq.x, mouse.y - sq.y);
+        if (dMouse < minHoverDist) {
+          minHoverDist = dMouse;
+          hoveredSquare = sq;
+        }
+      }
+
+      for (const sq of squares) {
+        const isHovered = (sq === hoveredSquare);
+        const speedScale = isHovered ? 0.15 : 1.0;
+
+        // Free rotation + gentle angular damping back to lively spin
+        sq.angle += sq.vAngle * speedScale;
+        if (Math.abs(sq.vAngle) > 0.06) {
+          sq.vAngle *= 0.985;
+        } else if (Math.abs(sq.vAngle) < 0.015) {
+          sq.vAngle += (sq.vAngle >= 0 ? 1 : -1) * 0.002;
+        }
+
+        if (sq.pulse > 0) sq.pulse = Math.max(0, sq.pulse - 0.03);
+
+        if (sq.state === 'CLOUD') {
+          const anchor = getCornerAnchor(sq.corner);
+          sq.orbitAngle += sq.orbitSpeed * speedScale;
+          const desiredX = anchor.x + Math.cos(sq.orbitAngle) * sq.orbitRadius;
+          const desiredY = anchor.y + Math.sin(sq.orbitAngle) * sq.orbitRadius;
+
+          sq.vx += (desiredX - sq.x) * 0.015;
+          sq.vy += (desiredY - sq.y) * 0.015;
+
+          // Keep outer cloud squares outside the central HomeBase buffer zone
+          const dxC = sq.x - hb.x;
+          const dyC = sq.y - hb.y;
+          const safeDist = hb.size * 0.85;
+          if (Math.abs(dxC) < safeDist && Math.abs(dyC) < safeDist) {
+            const pushAngle = Math.atan2(dyC, dxC);
+            sq.vx += Math.cos(pushAngle) * 0.6;
+            sq.vy += Math.sin(pushAngle) * 0.6;
+          }
+
+          sq.vx *= 0.92;
+          sq.vy *= 0.92;
+          sq.x += sq.vx * speedScale;
+          sq.y += sq.vy * speedScale;
+          sq.trail.length = 0;
+
+        } else if (sq.state === 'FLYING_IN') {
+          sq.trail.push({ x: sq.x, y: sq.y });
+          if (sq.trail.length > 14) sq.trail.shift();
+
+          const dx = sq.targetX - sq.x;
+          const dy = sq.targetY - sq.y;
+          const dist = Math.hypot(dx, dy);
+
+          if (dist < 8) {
+            sq.x = sq.targetX;
+            sq.y = sq.targetY;
+            sq.vx = 0;
+            sq.vy = 0;
+
+            if (sq.afterFlight === 'WAIT_AT_LOCK') {
+              sq.state = 'WAITING_LOCK';
+            } else if (sq.afterFlight === 'ALLOW_IN') {
+              triggerGreenPass(sq, { side: sq.targetSide, gatePos: sq.targetGatePos });
+              sq.state = 'ENTERING';
+            } else {
+              triggerRedReject(sq);
+            }
+          } else {
+            const spd = Math.min(9.5, Math.max(3.2, dist * 0.12));
+            sq.vx = (dx / dist) * spd;
+            sq.vy = (dy / dist) * spd;
+            sq.x += sq.vx;
+            sq.y += sq.vy;
+            sq.vAngle = 0.14;
+          }
+
+        } else if (sq.state === 'WAITING_LOCK') {
+          // Gently bob right at the outer edge of the HomeBase square outline
+          sq.trail.length = 0;
+          const edge = getHomeBaseEdgeTarget(sq);
+          sq.x += (edge.x - sq.x) * 0.15;
+          sq.y += (edge.y - sq.y) * 0.15;
+          sq.vAngle = 0.04;
+
+        } else if (sq.state === 'ENTERING') {
+          sq.trail.push({ x: sq.x, y: sq.y });
+          if (sq.trail.length > 10) sq.trail.shift();
+
+          const dx = hb.x - sq.x;
+          const dy = hb.y - sq.y;
+          const dist = Math.hypot(dx, dy);
+          sq.x += (dx / Math.max(1, dist)) * 4.5;
+          sq.y += (dy / Math.max(1, dist)) * 4.5;
+
+          if (Math.abs(sq.x - hb.x) < half - 26 && Math.abs(sq.y - hb.y) < half - 26) {
+            sq.state = 'INSIDE';
+            sq.trail.length = 0;
+            sq.vx = (Math.random() - 0.5) * 1.5;
+            sq.vy = (Math.random() - 0.5) * 1.5;
+          }
+
+        } else if (sq.state === 'INSIDE') {
+          sq.x += sq.vx * speedScale;
+          sq.y += sq.vy * speedScale;
+
+          // Keep gentle cruising momentum inside HomeBase
+          const spd = Math.hypot(sq.vx, sq.vy);
+          if (spd < 0.45) {
+            sq.vx += (Math.random() - 0.5) * 0.25;
+            sq.vy += (Math.random() - 0.5) * 0.25;
+          } else if (spd > 1.8) {
+            sq.vx *= 0.96;
+            sq.vy *= 0.96;
+          }
+
+          // Bounce off the inside walls of the HomeBase square
+          const minX = hb.x - half + innerPad;
+          const maxX = hb.x + half - innerPad;
+          const minY = hb.y - half + innerPad;
+          const maxY = hb.y + half - innerPad;
+
+          if (sq.x < minX) { sq.x = minX; sq.vx = Math.abs(sq.vx); sq.vAngle = -sq.vAngle; }
+          if (sq.x > maxX) { sq.x = maxX; sq.vx = -Math.abs(sq.vx); sq.vAngle = -sq.vAngle; }
+          if (sq.y < minY) { sq.y = minY; sq.vy = Math.abs(sq.vy); sq.vAngle = -sq.vAngle; }
+          if (sq.y > maxY) { sq.y = maxY; sq.vy = -Math.abs(sq.vy); sq.vAngle = -sq.vAngle; }
+
+        } else if (sq.state === 'REJECTED_OUT') {
+          sq.trail.push({ x: sq.x, y: sq.y });
+          if (sq.trail.length > 14) sq.trail.shift();
+
+          const anchor = getCornerAnchor(sq.corner);
+          const dx = anchor.x - sq.x;
+          const dy = anchor.y - sq.y;
+          const dist = Math.hypot(dx, dy);
+
+          sq.vx += (dx / Math.max(1, dist)) * 0.45;
+          sq.vy += (dy / Math.max(1, dist)) * 0.45;
+          sq.vx *= 0.94;
+          sq.vy *= 0.94;
+          sq.x += sq.vx;
+          sq.y += sq.vy;
+
+          if (dist < 75) {
+            sq.state = 'CLOUD';
+            sq.trail.length = 0;
+          }
+        }
+      }
+
+      // Elastic collisions inside HomeBase and in the outer cloud
+      const insideGroup = squares.filter(s => s.state === 'INSIDE');
+      const cloudGroup = squares.filter(s => s.state === 'CLOUD');
+      resolveCollisions(insideGroup);
+      resolveCollisions(cloudGroup);
+
+      // Update particles & shockwaves
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.95;
+        p.vy *= 0.95;
+        p.life -= p.decay;
+        if (p.life <= 0) particles.splice(i, 1);
+      }
+
+      for (let i = shockwaves.length - 1; i >= 0; i--) {
+        const sw = shockwaves[i];
+        sw.size += 5.5;
+        sw.alpha -= 0.024;
+        if (sw.alpha <= 0) shockwaves.splice(i, 1);
+      }
+
+      // Update Tooltip UI
+      if (hoveredSquare) {
+        tooltip.classList.add('visible');
+        const clampedX = Math.max(160, Math.min(W - 160, hoveredSquare.x));
+        const clampedY = Math.max(150, hoveredSquare.y - 14);
+        tooltip.style.left = `${clampedX}px`;
+        tooltip.style.top = `${clampedY}px`;
+
+        document.getElementById('ttIp').textContent = hoveredSquare.ip;
+        const badgeEl = document.getElementById('ttBadge');
+        badgeEl.textContent = hoveredSquare.badge;
+        badgeEl.style.color = hoveredSquare.badgeColor;
+        document.getElementById('ttLoc').textContent = hoveredSquare.location;
+        document.getElementById('ttRoute').textContent = hoveredSquare.route;
+        document.getElementById('ttDetail').textContent = hoveredSquare.detail;
+        document.getElementById('ttDevice').textContent = hoveredSquare.device;
+        document.getElementById('ttTime').textContent = hoveredSquare.time;
+      } else {
+        tooltip.classList.remove('visible');
+      }
+    }
+
+    function drawHomeBase() {
+      const cx = hb.x + hb.shakeX;
+      const cy = hb.y + hb.shakeY;
+      const half = hb.size / 2;
+
+      // Shockwave rings
+      for (const sw of shockwaves) {
+        ctx.save();
+        ctx.strokeStyle = sw.color;
+        ctx.globalAlpha = Math.max(0, sw.alpha);
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(cx - sw.size / 2, cy - sw.size / 2, sw.size, sw.size);
+        ctx.restore();
+      }
+
+      ctx.save();
+      // Determine outline color & glow from green/red states
+      let strokeColor = '#ffffff';
+      let shadowColor = 'rgba(255,255,255,0.25)';
+      let shadowBlur = 10;
+      let lineWidth = 2;
+
+      if (hb.redGlow > 0.01) {
+        strokeColor = '#ff2244';
+        shadowColor = '#ff2244';
+        shadowBlur = 35 * hb.redGlow;
+        lineWidth = 2 + 2.5 * hb.redGlow;
+      } else if (hb.greenGlow > 0.01) {
+        strokeColor = '#00ff88';
+        shadowColor = '#00ff88';
+        shadowBlur = 32 * hb.greenGlow;
+        lineWidth = 2 + 2 * hb.greenGlow;
+      }
+
+      ctx.strokeStyle = strokeColor;
+      ctx.shadowColor = shadowColor;
+      ctx.shadowBlur = shadowBlur;
+      ctx.lineWidth = lineWidth;
+
+      // Draw HomeBase square outline (with brief aperture opening when a square enters)
+      const gapHalf = 14 * hb.gateOpen;
+      ctx.beginPath();
+      // Top edge
+      if (hb.gateOpen > 0.05 && hb.gateSide === 'top') {
+        const gx = cx + hb.gatePos;
+        ctx.moveTo(cx - half, cy - half);
+        ctx.lineTo(Math.max(cx - half, gx - gapHalf), cy - half);
+        ctx.moveTo(Math.min(cx + half, gx + gapHalf), cy - half);
+        ctx.lineTo(cx + half, cy - half);
+      } else {
+        ctx.moveTo(cx - half, cy - half);
+        ctx.lineTo(cx + half, cy - half);
+      }
+      // Right edge
+      if (hb.gateOpen > 0.05 && hb.gateSide === 'right') {
+        const gy = cy + hb.gatePos;
+        ctx.moveTo(cx + half, cy - half);
+        ctx.lineTo(cx + half, Math.max(cy - half, gy - gapHalf));
+        ctx.moveTo(cx + half, Math.min(cy + half, gy + gapHalf));
+        ctx.lineTo(cx + half, cy + half);
+      } else {
+        ctx.moveTo(cx + half, cy - half);
+        ctx.lineTo(cx + half, cy + half);
+      }
+      // Bottom edge
+      if (hb.gateOpen > 0.05 && hb.gateSide === 'bottom') {
+        const gx = cx + hb.gatePos;
+        ctx.moveTo(cx + half, cy + half);
+        ctx.lineTo(Math.min(cx + half, gx + gapHalf), cy + half);
+        ctx.moveTo(Math.max(cx - half, gx - gapHalf), cy + half);
+        ctx.lineTo(cx - half, cy + half);
+      } else {
+        ctx.moveTo(cx + half, cy + half);
+        ctx.lineTo(cx - half, cy + half);
+      }
+      // Left edge
+      if (hb.gateOpen > 0.05 && hb.gateSide === 'left') {
+        const gy = cy + hb.gatePos;
+        ctx.moveTo(cx - half, cy + half);
+        ctx.lineTo(cx - half, Math.min(cy + half, gy + gapHalf));
+        ctx.moveTo(cx - half, Math.max(cy - half, gy - gapHalf));
+        ctx.lineTo(cx - half, cy - half);
+      } else {
+        ctx.moveTo(cx - half, cy + half);
+        ctx.lineTo(cx - half, cy - half);
+      }
+      ctx.stroke();
+
+      // Center Label: "HomeBase"
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = hb.redGlow > 0.2 ? '#ff2244' : (hb.greenGlow > 0.2 ? '#00ff88' : '#ffffff');
+      ctx.font = '600 18px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('HomeBase', cx, cy);
+      ctx.restore();
+    }
+
+    function drawSquares() {
+      for (const sq of squares) {
+        // Motion trail for flying squares
+        if (sq.trail.length > 1) {
+          ctx.save();
+          ctx.beginPath();
+          for (let i = 0; i < sq.trail.length; i++) {
+            const pt = sq.trail[i];
+            if (i === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.strokeStyle = sq.color;
+          ctx.globalAlpha = 0.35;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Lock-screen waiting tether to the HomeBase wall
+        if (sq.state === 'WAITING_LOCK') {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255, 190, 11, 0.45)';
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(sq.x, sq.y);
+          ctx.lineTo(
+            Math.max(hb.x - hb.size / 2, Math.min(hb.x + hb.size / 2, sq.x)),
+            Math.max(hb.y - hb.size / 2, Math.min(hb.y + hb.size / 2, sq.y))
+          );
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        ctx.save();
+        ctx.translate(sq.x, sq.y);
+        ctx.rotate(sq.angle);
+
+        const s = sq.size;
+        const isHovered = (sq === hoveredSquare);
+
+        if (sq.state === 'WAITING_LOCK' || sq.state === 'FLYING_IN' || sq.pulse > 0 || isHovered) {
+          ctx.shadowColor = sq.color;
+          ctx.shadowBlur = isHovered ? 16 : 10;
+        }
+
+        ctx.strokeStyle = isHovered ? '#ffffff' : sq.color;
+        ctx.lineWidth = isHovered ? 2 : 1.4;
+        ctx.fillStyle = sq.isClaimed ? sq.color : 'rgba(136, 146, 176, 0.18)';
+        ctx.globalAlpha = sq.isClaimed ? 0.88 : 0.45;
+
+        ctx.fillRect(-s / 2, -s / 2, s, s);
+        ctx.globalAlpha = 1;
+        ctx.strokeRect(-s / 2, -s / 2, s, s);
+        ctx.restore();
+
+        // Hover lock reticle
+        if (isHovered) {
+          ctx.save();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1;
+          const r = sq.size + 6;
+          ctx.strokeRect(sq.x - r, sq.y - r, r * 2, r * 2);
+          ctx.restore();
+        }
+      }
+
+      // Collision / entry sparks
+      for (const p of particles) {
+        ctx.save();
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = Math.max(0, p.life);
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        ctx.restore();
+      }
+    }
+
+    function loop() {
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, W, H);
+
+      updatePhysics();
+      drawHomeBase();
+      drawSquares();
+
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
