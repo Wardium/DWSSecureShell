@@ -4,7 +4,6 @@ import os
 import logging
 import sys
 import uuid
-import time
 import requests
 from datetime import datetime, timedelta
 
@@ -12,13 +11,14 @@ from datetime import datetime, timedelta
 ALLOWED_ORIGINS = [
     "https://teamexist.com",
     "https://www.teamexist.com",
-    "https://cloud.teamexist.com"
+    "https://cloud.teamexist.com",
+    "https://auth.teamexist.com"
 ]
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
-    stream=sys.stdout, 
-    level=logging.INFO, 
+    stream=sys.stdout,
+    level=logging.INFO,
     format='[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -32,22 +32,32 @@ app.secret_key = 'weqr1234'
 USER_PASSWORD = "weqr1234"
 ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
+MAX_EVENTS = 100
 
 TRUSTED_IPS = [
-    "127.0.0.1",      
-    "192.168.2.91",   
-    "172.18.0.1"      
+    "127.0.0.1",
+    "192.168.2.91",
+    "172.18.0.1"
 ]
 
 # --- HELPER FUNCTIONS FOR GEOLOCATION ---
-def get_ip_location(ip):
+def get_ip_location(ip, data=None):
     if ip.startswith(('192.168.', '10.', '127.', '172.')):
         return "Local Network"
+    if data and ip in data.get('geo_cache', {}):
+        return data['geo_cache'][ip]
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/123.0'}
-        geo_resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city", headers=headers, timeout=2).json()
+        geo_resp = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,country,city",
+            headers=headers,
+            timeout=2
+        ).json()
         if geo_resp.get('status') == 'success':
-            return f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+            loc = f"{geo_resp.get('city')}, {geo_resp.get('country')}"
+            if data is not None:
+                data.setdefault('geo_cache', {})[ip] = loc
+            return loc
     except Exception:
         pass
     return "Unknown Location"
@@ -57,13 +67,13 @@ def get_gps_address(lat, lon):
         headers = {'User-Agent': 'DWSGatekeeperAuth/1.0'}
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
         res = requests.get(url, headers=headers, timeout=3).json()
-        
+
         address = res.get('address', {})
         road = address.get('road', '')
         house_num = address.get('house_number', '')
         city = address.get('city') or address.get('town') or address.get('village', '')
         state = address.get('state', '')
-        
+
         formatted = f"{house_num} {road}, {city}, {state}".strip().strip(',')
         return formatted if formatted else res.get('display_name', f"GPS: {lat}, {lon}")
     except Exception as e:
@@ -73,23 +83,66 @@ def get_gps_address(lat, lon):
 # --- DATABASE MANAGEMENT (CRASH-PROOF) ---
 os.makedirs('data', exist_ok=True)
 
-DEFAULT_KEYS = {
-    "allowed_ips": {},
-    "banned_ips": {},
-    "attempts": {},
-    "active_sessions": {},
-    "waiting_logins": {},
-    "trusted_active": {},
-    "watch_peers": {},
-    "watch_events": []
-}
+def default_db_structure():
+    return {
+        "allowed_ips": {},
+        "banned_ips": {},
+        "attempts": {},
+        "active_sessions": {},
+        "pending_logins": {},
+        "known_ips": {},
+        "geo_cache": {},
+        "events": [],
+        "last_event_id": 0
+    }
+
+def record_event(data, event_type, ip, route, status_code, detail="", location=None, user_agent=None, origin=None, session_id=None):
+    """Appends a real network/auth event to the rolling telemetry queue."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if not user_agent:
+        user_agent = request.headers.get('User-Agent', 'Unknown Browser')
+    short_ua = user_agent[:48] + "..." if len(user_agent) > 48 else user_agent
+
+    if not location:
+        existing_loc = data.get('known_ips', {}).get(ip, {}).get('location')
+        location = existing_loc if existing_loc else ("📍 " + get_ip_location(ip, data))
+
+    # Maintain persistent metadata for known external/visitor IPs
+    data.setdefault('known_ips', {})[ip] = {
+        "ip": ip,
+        "location": location,
+        "device_info": short_ua,
+        "last_route": route,
+        "last_seen": now_str,
+        "last_status": status_code
+    }
+
+    next_id = int(data.get('last_event_id', 0)) + 1
+    data['last_event_id'] = next_id
+
+    event_obj = {
+        "id": next_id,
+        "type": event_type,       # AUTH_OK, REJECT, LOCK_WAIT, LOCK_ABANDON, LOGIN_SUCCESS, LOGIN_FAIL, VERIFY_OK, VERIFY_FAIL, LOGOUT, REVOKE, ADMIN_ALLOW, ADMIN_BAN
+        "ip": ip,
+        "route": route,
+        "status": status_code,
+        "detail": detail,
+        "location": location,
+        "device_info": short_ua,
+        "origin": origin or "",
+        "session_id": session_id or "",
+        "time": now_str
+    }
+
+    events = data.setdefault('events', [])
+    events.append(event_obj)
+    if len(events) > MAX_EVENTS:
+        data['events'] = events[-MAX_EVENTS:]
 
 def cleanup_old_attempts(data):
     now = datetime.now()
-    now_ts = time.time()
-
-    # 1. Clean up expired attempts (5 minutes)
     expired_ips = []
+
     for ip, info in list(data.get('attempts', {}).items()):
         try:
             last_attempt = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
@@ -97,61 +150,55 @@ def cleanup_old_attempts(data):
                 expired_ips.append(ip)
         except (ValueError, KeyError, TypeError):
             expired_ips.append(ip)
-            
+
     for ip in expired_ips:
         data['attempts'].pop(ip, None)
 
-    # 2. Clean up stale lock-screen waiting states (older than 120s -> auto-fly back to cloud)
-    for ip, info in list(data.get('waiting_logins', {}).items()):
-        if now_ts - info.get('ts', 0) > 120:
-            data['waiting_logins'].pop(ip, None)
-            data['watch_events'].append({
-                "id": uuid.uuid4().hex[:12],
-                "ts": now_ts,
-                "time": now.strftime("%H:%M:%S"),
-                "ip": ip,
-                "type": "login_timeout",
-                "endpoint": "/login",
-                "status": "LOCK SCREEN TIMEOUT",
-                "location": info.get("location", "📍 Unknown"),
-                "device_info": info.get("device_info", "Unknown Browser"),
-                "target": info.get("target", "")
-            })
+    # Expire lock-screen waits if the user closed the tab or went idle > 75 seconds
+    expired_pending = []
+    for ip, info in list(data.get('pending_logins', {}).items()):
+        try:
+            wait_Start = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
+            if now - wait_Start > timedelta(seconds=75):
+                expired_pending.append((ip, info))
+        except (ValueError, KeyError, TypeError):
+            expired_pending.append((ip, {}))
 
-    # 3. Keep only the last 60 real-time events (and prune events older than 120s)
-    events = data.get('watch_events', [])
-    if isinstance(events, list):
-        events = [e for e in events if now_ts - e.get('ts', 0) < 120][-60:]
-        data['watch_events'] = events
-    else:
-        data['watch_events'] = []
-
-    # 4. Cap watch_peers history at 120 known external IPs
-    peers = data.get('watch_peers', {})
-    if len(peers) > 120:
-        sorted_ips = sorted(peers.keys(), key=lambda k: peers[k].get('ts', 0), reverse=True)
-        data['watch_peers'] = {k: peers[k] for k in sorted_ips[:120]}
+    for ip, info in expired_pending:
+        data['pending_logins'].pop(ip, None)
+        record_event(
+            data,
+            event_type="LOCK_ABANDON",
+            ip=ip,
+            route="/login",
+            status_code=408,
+            detail="Lock screen timed out / closed",
+            location=info.get('location'),
+            user_agent=info.get('device_info')
+        )
 
     return data
 
 def load_data():
+    defaults = default_db_structure()
+
     if not os.path.exists(DATA_FILE):
-        return {k: (list(v) if isinstance(v, list) else dict(v)) for k, v in DEFAULT_KEYS.items()}
-        
+        return defaults
+
     try:
         with open(DATA_FILE, 'r') as f:
             data = json.load(f)
     except Exception as e:
         logging.warning(f"[Gatekeeper] Database corrupted or empty ({e}). Rebuilding clean state...")
-        return {k: (list(v) if isinstance(v, list) else dict(v)) for k, v in DEFAULT_KEYS.items()}
-        
+        return defaults
+
     if not isinstance(data, dict):
-        return {k: (list(v) if isinstance(v, list) else dict(v)) for k, v in DEFAULT_KEYS.items()}
-        
-    for key, default_val in DEFAULT_KEYS.items():
+        return defaults
+
+    for key, default_val in defaults.items():
         if key not in data or not isinstance(data[key], type(default_val)):
-            data[key] = list(default_val) if isinstance(default_val, list) else dict(default_val)
-            
+            data[key] = default_val
+
     return cleanup_old_attempts(data)
 
 def save_data(data):
@@ -172,69 +219,19 @@ def get_client_ip():
         forwarded_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     return (forwarded_ip or "127.0.0.1").split(',')[0].strip()
 
-def short_ua():
-    ua = request.headers.get('User-Agent', 'Unknown Browser')
-    return ua[:45] + "..." if len(ua) > 45 else ua
-
-def resolve_cached_location(data, ip):
-    """Uses cached location if available so /auth and /api/verify stay fast."""
-    if ip in data.get('watch_peers', {}) and data['watch_peers'][ip].get('location'):
-        return data['watch_peers'][ip]['location']
-    if ip in data.get('attempts', {}) and data['attempts'][ip].get('location'):
-        return data['attempts'][ip]['location']
-    for s in data.get('active_sessions', {}).values():
-        if s.get('ip') == ip and s.get('location'):
-            return s['location']
-    return "📍 " + get_ip_location(ip)
-
-def record_watch_event(data, ip, event_type, endpoint, status, target="", location=None, session_id=None, throttle_sec=0):
-    """Appends a real network event for the /watch visualizer and updates peer metadata."""
-    now_ts = time.time()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ua = short_ua()
-    loc = location or resolve_cached_location(data, ip)
-
-    peer = data['watch_peers'].get(ip, {})
-    last_event_ts = peer.get('last_event_ts', 0)
-    last_event_type = peer.get('last_event_type', '')
-
-    # Always update known peer metadata
-    data['watch_peers'][ip] = {
-        "ip": ip,
-        "location": loc,
-        "device_info": ua,
-        "last_endpoint": endpoint,
-        "last_status": status,
-        "target": target or peer.get('target', ''),
-        "time": now_str,
-        "ts": now_ts,
-        "hit_count": peer.get('hit_count', 0) + 1,
-        "last_event_ts": last_event_ts,
-        "last_event_type": last_event_type
-    }
-
-    # Throttle burst subrequests (e.g. Nginx auth_request firing 15 times on a single page load)
-    if throttle_sec > 0 and last_event_type == event_type and (now_ts - last_event_ts) < throttle_sec:
-        return False
-
-    data['watch_peers'][ip]['last_event_ts'] = now_ts
-    data['watch_peers'][ip]['last_event_type'] = event_type
-
-    data['watch_events'].append({
-        "id": uuid.uuid4().hex[:12],
-        "ts": now_ts,
-        "time": datetime.now().strftime("%H:%M:%S"),
-        "ip": ip,
-        "type": event_type,  # 'admitted', 'rejected', 'waiting_login', 'activity', 'evicted', 'login_timeout'
-        "endpoint": endpoint,
-        "status": status,
-        "location": loc,
-        "device_info": ua,
-        "target": target,
-        "session_id": session_id
-    })
+def should_emit_pass_event(data, ip, cooldown_sec=4):
+    """Prevents static asset bursts (CSS/JS/images) from spamming 30 identical pass events in 1 second."""
+    now = datetime.now()
+    for ev in reversed(data.get('events', [])):
+        if ev.get('ip') == ip and ev.get('type') in ('AUTH_OK', 'VERIFY_OK'):
+            try:
+                ev_time = datetime.strptime(ev['time'], "%Y-%m-%d %H:%M:%S")
+                if (now - ev_time).total_seconds() < cooldown_sec:
+                    return False
+            except Exception:
+                pass
+            break
     return True
-
 
 # --- ROUTES ---
 
@@ -243,231 +240,142 @@ def index():
     return redirect(url_for('login'))
 
 @app.route('/watch')
-def watch_dashboard():
-    """Zero-option live traffic visualizer."""
-    is_admin = (request.cookies.get('dws_admin') == 'granted')
-    return render_template('watch.html', is_admin=is_admin)
+@app.route('/homebase')
+def watch_homebase():
+    """Zero-options real-time HomeBase visualizer."""
+    return render_template('watch.html')
 
-@app.route('/api/watch/state')
-def api_watch_state():
-    """Returns 100% real server state and real-time events since the client's last cursor."""
+@app.route('/api/telemetry', methods=['GET', 'OPTIONS'])
+def api_telemetry():
+    """Real-time data feed for the /watch visualizer."""
+    origin = request.headers.get('Origin')
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
+    since_id = request.args.get('since', default=0, type=int)
     data = load_data()
-    since_ts = request.args.get('since', default=0.0, type=float)
+    # Save if cleanup_old_attempts expired any pending_logins
+    save_data(data)
 
-    # 1. Build list of everything currently connected INSIDE HomeBase
-    inside_nodes = []
-    seen_inside_ips = set()
+    new_events = [ev for ev in data.get('events', []) if ev.get('id', 0) > since_id]
 
-    # Active authenticated cookie sessions
-    for sid, info in data.get('active_sessions', {}).items():
-        ip = info.get('ip', 'Unknown')
-        seen_inside_ips.add(ip)
-        peer = data.get('watch_peers', {}).get(ip, {})
-        inside_nodes.append({
-            "key": f"session:{sid}",
-            "session_id": sid,
-            "ip": ip,
-            "kind": "SESSION",
-            "location": info.get('location', '📍 Unknown'),
-            "device_info": info.get('device_info', 'Unknown Browser'),
-            "time": info.get('time', ''),
-            "last_endpoint": peer.get('last_endpoint', '/login'),
-            "target": peer.get('target', 'https://cloud.teamexist.com'),
-            "hit_count": peer.get('hit_count', 1)
-        })
-
-    # Whitelisted IPs
-    for ip, info in data.get('allowed_ips', {}).items():
-        if ip in seen_inside_ips:
-            continue
-        seen_inside_ips.add(ip)
-        peer = data.get('watch_peers', {}).get(ip, {})
-        inside_nodes.append({
-            "key": f"allowed:{ip}",
-            "session_id": None,
-            "ip": ip,
-            "kind": f"WHITELIST ({info.get('name', 'Allowed')})",
-            "location": peer.get('location') or ("📍 " + get_ip_location(ip)),
-            "device_info": peer.get('device_info', 'Whitelisted Host'),
-            "time": info.get('time', ''),
-            "last_endpoint": peer.get('last_endpoint', '/auth'),
-            "target": peer.get('target', ''),
-            "hit_count": peer.get('hit_count', 1)
-        })
-
-    # Trusted local/LAN IPs that have actively passed through /auth
-    for ip, info in data.get('trusted_active', {}).items():
-        if ip in seen_inside_ips:
-            continue
-        seen_inside_ips.add(ip)
-        inside_nodes.append({
-            "key": f"trusted:{ip}",
-            "session_id": None,
-            "ip": ip,
-            "kind": "TRUSTED LAN",
-            "location": info.get('location', '📍 Local Network'),
-            "device_info": info.get('device_info', 'LAN Host'),
-            "time": info.get('time', ''),
-            "last_endpoint": info.get('endpoint', '/auth'),
-            "target": info.get('target', ''),
-            "hit_count": info.get('hit_count', 1)
-        })
-
-    # 2. Build list of nodes currently parked at the HomeBase perimeter (/login screen)
-    waiting_nodes = []
-    for ip, info in data.get('waiting_logins', {}).items():
-        if ip not in seen_inside_ips:
-            waiting_nodes.append({
-                "ip": ip,
-                "location": info.get('location', '📍 Unknown'),
-                "device_info": info.get('device_info', 'Unknown Browser'),
-                "time": info.get('time', ''),
-                "target": info.get('target', ''),
-                "ts": info.get('ts', 0)
-            })
-
-    # 3. Build list of real external peers in the outer cloud (attempts, banned, previous visitors)
-    outside_peers = {}
-    for ip, info in data.get('watch_peers', {}).items():
-        if ip not in seen_inside_ips:
-            outside_peers[ip] = {
-                "ip": ip,
-                "state": "BANNED" if ip in data.get('banned_ips', {}) else ("ATTEMPTING" if ip in data.get('attempts', {}) else "OUTSIDE PEER"),
-                "location": info.get('location', '📍 Unknown'),
-                "device_info": info.get('device_info', 'Unknown Browser'),
-                "last_endpoint": info.get('last_endpoint', '/auth'),
-                "last_status": info.get('last_status', 'Observed'),
-                "target": info.get('target', ''),
-                "time": info.get('time', ''),
-                "attempts": data.get('attempts', {}).get(ip, {}).get('count', 0),
-                "hit_count": info.get('hit_count', 1)
-            }
-
-    for ip, info in data.get('attempts', {}).items():
-        if ip not in seen_inside_ips and ip not in outside_peers:
-            outside_peers[ip] = {
-                "ip": ip,
-                "state": "ATTEMPTING",
-                "location": info.get('location', '📍 Unknown'),
-                "device_info": "Unauthorized Client",
-                "last_endpoint": "/auth",
-                "last_status": "401 Unauthorized",
-                "target": "",
-                "time": info.get('time', ''),
-                "attempts": info.get('count', 1),
-                "hit_count": info.get('count', 1)
-            }
-
-    for ip, info in data.get('banned_ips', {}).items():
-        if ip not in seen_inside_ips and ip not in outside_peers:
-            outside_peers[ip] = {
-                "ip": ip,
-                "state": "BANNED",
-                "location": "📍 " + get_ip_location(ip),
-                "device_info": "Banned Host",
-                "last_endpoint": "/auth",
-                "last_status": "403 Banned",
-                "target": "",
-                "time": info.get('time', ''),
-                "attempts": 0,
-                "hit_count": 1
-            }
-
-    new_events = [e for e in data.get('watch_events', []) if e.get('ts', 0) > since_ts]
-
-    return jsonify({
-        "server_ts": time.time(),
-        "inside": inside_nodes,
-        "waiting": waiting_nodes,
-        "outside": list(outside_peers.values()),
+    payload = {
+        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_event_id": data.get('last_event_id', 0),
+        "active_sessions": data.get('active_sessions', {}),
+        "allowed_ips": data.get('allowed_ips', {}),
+        "banned_ips": data.get('banned_ips', {}),
+        "attempts": data.get('attempts', {}),
+        "pending_logins": data.get('pending_logins', {}),
+        "known_ips": data.get('known_ips', {}),
         "events": new_events
-    })
+    }
 
-@app.route('/api/watch/leave', methods=['POST'])
-def api_watch_leave():
-    """Called via navigator.sendBeacon if someone closes /login without logging in."""
+    response = jsonify(payload)
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+    return response
+
+@app.route('/api/login_leave', methods=['POST'])
+def api_login_leave():
+    """Triggered when a user closes the /login lock screen without authenticating."""
     ip = get_client_ip()
     data = load_data()
-    if ip in data.get('waiting_logins', {}):
-        info = data['waiting_logins'].pop(ip, {})
-        record_watch_event(
-            data, ip,
-            event_type="rejected",
-            endpoint="/login (closed)",
-            status="CLOSED LOCK SCREEN",
-            target=info.get('target', ''),
-            location=info.get('location')
+    if ip in data.get('pending_logins', {}):
+        info = data['pending_logins'].pop(ip, {})
+        record_event(
+            data,
+            event_type="LOCK_ABANDON",
+            ip=ip,
+            route="/login",
+            status_code=499,
+            detail="Closed lock screen tab",
+            location=info.get('location'),
+            user_agent=info.get('device_info')
         )
         save_data(data)
-    return "", 204
+    return jsonify({"status": "ok"})
 
 @app.route('/auth')
 def auth():
     ip = get_client_ip()
     target_url = request.headers.get('X-Original-URI', 'Unknown URL')
 
-    # Do not trigger self-animations when loading /watch or polling /api/watch
-    if target_url.startswith(('/watch', '/api/watch')):
+    # Do not generate self-traffic when viewing the /watch visualizer
+    if any(target_url.startswith(p) for p in ('/watch', '/homebase', '/api/telemetry', '/api/login_leave')):
         return "OK", 200
 
     data = load_data()
 
     if ip in TRUSTED_IPS or ip.startswith(('172.', '10.', '192.168.')):
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        was_known = ip in data['trusted_active']
-        prev_hits = data['trusted_active'].get(ip, {}).get('hit_count', 0)
-        data['trusted_active'][ip] = {
-            "ip": ip,
-            "location": "📍 Local Network",
-            "device_info": short_ua(),
-            "time": now_str,
-            "endpoint": "/auth",
-            "target": target_url,
-            "hit_count": prev_hits + 1
-        }
-        changed = record_watch_event(
-            data, ip,
-            event_type="activity" if was_known else "admitted",
-            endpoint="/auth",
-            status="TRUSTED IP OK (200)",
-            target=target_url,
-            location="📍 Local Network",
-            throttle_sec=4 if was_known else 0
-        )
-        if not was_known or changed:
+        if should_emit_pass_event(data, ip, cooldown_sec=6):
+            record_event(
+                data,
+                event_type="AUTH_OK",
+                ip=ip,
+                route="/auth",
+                status_code=200,
+                detail=f"Trusted LAN -> {target_url}",
+                location="📍 Local Network"
+            )
             save_data(data)
         return "OK", 200
 
     if ip in data['banned_ips']:
-        if record_watch_event(data, ip, "rejected", "/auth", "BANNED IP (403)", target=target_url, throttle_sec=2):
-            save_data(data)
+        record_event(
+            data,
+            event_type="REJECT",
+            ip=ip,
+            route="/auth",
+            status_code=403,
+            detail=f"Banned IP blocked -> {target_url}"
+        )
+        save_data(data)
         return "Banned", 403
-        
+
     session_id = request.cookies.get('dws_auth')
     if ip in data['allowed_ips'] or (session_id and session_id in data['active_sessions']):
-        if record_watch_event(data, ip, "activity", "/auth", "AUTHORIZED (200)", target=target_url, session_id=session_id, throttle_sec=4):
-            save_data(data)
+        if session_id and session_id in data['active_sessions']:
+            data['active_sessions'][session_id]['last_seen'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data['active_sessions'][session_id]['last_uri'] = target_url
+        if should_emit_pass_event(data, ip, cooldown_sec=4):
+            record_event(
+                data,
+                event_type="AUTH_OK",
+                ip=ip,
+                route="/auth",
+                status_code=200,
+                detail=f"Authorized -> {target_url}",
+                session_id=session_id
+            )
+        save_data(data)
         return "OK", 200
-    
-    loc = resolve_cached_location(data, ip)
+
+    loc_str = "📍 " + get_ip_location(ip, data)
     if ip not in data['attempts']:
         data['attempts'][ip] = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "count": 1,
-            "location": loc
+            "location": loc_str
         }
     else:
         data['attempts'][ip]['count'] += 1
         data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-    record_watch_event(
-        data, ip,
-        event_type="rejected",
-        endpoint="/auth",
-        status=f"STOPPED BY GATEKEEPER (Attempt #{data['attempts'][ip]['count']})",
-        target=target_url,
-        location=loc,
-        throttle_sec=2
+
+    record_event(
+        data,
+        event_type="REJECT",
+        ip=ip,
+        route="/auth",
+        status_code=401,
+        detail=f"Stopped by Gatekeeper -> {target_url}",
+        location=loc_str
     )
     save_data(data)
     return "Unauthorized", 401
@@ -477,116 +385,119 @@ def login():
     redirect_url = request.args.get('redirect', '')
     ip = get_client_ip()
     data = load_data()
-    
+    user_agent = request.headers.get('User-Agent', 'Unknown Browser')
+    short_ua = user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
+
     session_id = request.cookies.get('dws_auth')
     invalid_cookie = bool(session_id and session_id not in data['active_sessions'])
 
     if request.method == 'POST':
         password = request.form.get('password')
-        data['waiting_logins'].pop(ip, None)
-
         if password == USER_PASSWORD:
             new_session_id = str(uuid.uuid4())
-            user_agent = request.headers.get('User-Agent', 'Unknown Browser')
-            
             lat = request.form.get('lat')
             lon = request.form.get('lon')
-            
+
             if lat and lon and lat.strip() and lon.strip():
                 location_str = "🎯 " + get_gps_address(lat, lon)
             else:
-                location_str = resolve_cached_location(data, ip)
+                location_str = "📍 " + get_ip_location(ip, data)
 
             data['active_sessions'][new_session_id] = {
                 "ip": ip,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "location": location_str,
-                "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
+                "device_info": short_ua
             }
-            
-            if ip in data['attempts']:
-                del data['attempts'][ip]
 
-            record_watch_event(
-                data, ip,
-                event_type="admitted",
-                endpoint="/login",
-                status="PASSWORD ACCEPTED -> SESSION ISSUED",
-                target=redirect_url or "/",
+            data['attempts'].pop(ip, None)
+            data['pending_logins'].pop(ip, None)
+
+            record_event(
+                data,
+                event_type="LOGIN_SUCCESS",
+                ip=ip,
+                route="/login",
+                status_code=200,
+                detail="Lock screen password accepted",
                 location=location_str,
+                user_agent=user_agent,
                 session_id=new_session_id
             )
             save_data(data)
-            
+
             logging.info(f"[Gatekeeper] LOGIN SUCCESS -> Issued Session ID to {ip} ({location_str})")
-            
+
             resp = make_response(redirect(redirect_url if redirect_url else '/'))
             resp.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com', samesite='None', secure=True)
             return resp
         else:
-            loc = resolve_cached_location(data, ip)
+            loc_str = "📍 " + get_ip_location(ip, data)
             if ip not in data['attempts']:
-                data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc}
+                data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc_str}
             else:
                 data['attempts'][ip]['count'] += 1
                 data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            record_watch_event(
-                data, ip,
-                event_type="rejected",
-                endpoint="/login",
-                status="WRONG PASSWORD",
-                target=redirect_url or "/login",
-                location=loc
+            data['pending_logins'].pop(ip, None)
+            record_event(
+                data,
+                event_type="LOGIN_FAIL",
+                ip=ip,
+                route="/login",
+                status_code=401,
+                detail="Wrong password on lock screen",
+                location=loc_str,
+                user_agent=user_agent
             )
             save_data(data)
             logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
 
     else:
-        # GET /login -> Visitor is sitting on the lock screen waiting to enter password
-        loc = resolve_cached_location(data, ip)
-        data['waiting_logins'][ip] = {
+        # GET /login -> Visitor is currently sitting at the lock screen waiting to enter password
+        loc_str = "📍 " + get_ip_location(ip, data)
+        data['pending_logins'][ip] = {
             "ip": ip,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ts": time.time(),
-            "location": loc,
-            "device_info": short_ua(),
-            "target": redirect_url or "/login"
+            "location": loc_str,
+            "device_info": short_ua,
+            "redirect_url": redirect_url
         }
-        record_watch_event(
-            data, ip,
-            event_type="waiting_login",
-            endpoint="/login",
-            status="AT LOCK SCREEN (AWAITING PASSWORD)",
-            target=redirect_url or "/login",
-            location=loc,
-            throttle_sec=2
+        record_event(
+            data,
+            event_type="LOCK_WAIT",
+            ip=ip,
+            route="/login",
+            status_code=200,
+            detail=f"Waiting at lock screen ({redirect_url or 'direct'})",
+            location=loc_str,
+            user_agent=user_agent
         )
         save_data(data)
 
     resp = make_response(render_template('login.html', redirect_url=redirect_url))
-    
+
     if invalid_cookie:
         resp.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com', samesite='None', secure=True)
         logging.info(f"[Gatekeeper] Deleted revoked cookie from browser at IP: {ip}")
-        
+
     return resp
 
 def check_token(token):
     print(f"[Gatekeeper] 3. Checking token string: {token}", flush=True)
-    
+
     if not token:
         print("[Gatekeeper] -> Result: FAILED. No token was provided by the browser.", flush=True)
         return False
-        
+
     log_path = os.path.join("data", "access_log.json")
-    
+
     try:
         with open(log_path, "r") as file:
             log_data = json.load(file)
-            
+
         active_sessions = log_data.get("active_sessions", {})
-        
+
         if token in active_sessions:
             session_info = active_sessions[token]
             matched_ip = session_info.get('ip', 'Unknown IP')
@@ -594,21 +505,20 @@ def check_token(token):
             return True
         else:
             print("[Gatekeeper] -> Result: FAILED. Token not found in active_sessions dictionary.", flush=True)
-            
+
     except FileNotFoundError:
         print(f"[Gatekeeper] -> Error: Could not find {log_path}", flush=True)
     except json.JSONDecodeError:
         print(f"[Gatekeeper] -> Error: {log_path} contains invalid JSON", flush=True)
-        
+
     return False
 
 @app.route('/api/verify', methods=['POST', 'OPTIONS'])
 def verify_access():
     print(f"\n[Gatekeeper] 1. --- New Authorization Request ---", flush=True)
-    
+
     origin = request.headers.get('Origin')
-    
-    # --- 1. Handle the Browser's Preflight Check ---
+
     if request.method == 'OPTIONS':
         response = make_response()
         if origin in ALLOWED_ORIGINS:
@@ -617,29 +527,31 @@ def verify_access():
             response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
             response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
-        
-    # --- 2. Standard POST Processing ---
+
     client_ip = get_client_ip()
     print(f"[Gatekeeper] 2. Request from IP: {client_ip} | Origin: {origin}", flush=True)
 
     session_token = request.cookies.get('dws_auth')
     has_cookie = session_token is not None
-    is_valid = check_token(session_token) 
-
+    is_valid = check_token(session_token)
     data = load_data()
 
     if is_valid:
         print("[Gatekeeper] 4. Access GRANTED.", flush=True)
-        record_watch_event(
-            data, client_ip,
-            event_type="activity",
-            endpoint="/api/verify",
-            status="API VERIFY GRANTED",
-            target=origin or "API",
-            session_id=session_token,
-            throttle_sec=2
+        if session_token in data.get('active_sessions', {}):
+            data['active_sessions'][session_token]['last_seen'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        record_event(
+            data,
+            event_type="VERIFY_OK",
+            ip=client_ip,
+            route="/api/verify",
+            status_code=200,
+            detail=f"API Verify OK ({origin or 'direct'})",
+            origin=origin,
+            session_id=session_token
         )
         save_data(data)
+
         response = jsonify({
             "authorized": True,
             "dashboard_url": "https://cloud.teamexist.com",
@@ -652,15 +564,17 @@ def verify_access():
     else:
         reason = "Cookie 'dws_auth' was received, but check_token() returned False." if has_cookie else "No 'dws_auth' cookie was sent by the browser."
         print(f"[Gatekeeper] 4. Access DENIED. ({reason})", flush=True)
-        record_watch_event(
-            data, client_ip,
-            event_type="rejected",
-            endpoint="/api/verify",
-            status="API VERIFY DENIED",
-            target=origin or "API",
-            throttle_sec=1
+        record_event(
+            data,
+            event_type="VERIFY_FAIL",
+            ip=client_ip,
+            route="/api/verify",
+            status_code=401,
+            detail=reason,
+            origin=origin
         )
         save_data(data)
+
         response = jsonify({
             "authorized": False,
             "debug": {
@@ -669,12 +583,11 @@ def verify_access():
                 "reason": reason
             }
         })
-        
-    # --- 3. Force the Headers on the Final Output ---
+
     if origin in ALLOWED_ORIGINS:
         response.headers.add("Access-Control-Allow-Origin", origin)
         response.headers.add("Access-Control-Allow-Credentials", "true")
-        
+
     return response
 
 # --- API AUTHENTICATION ROUTES ---
@@ -682,8 +595,7 @@ def verify_access():
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def api_login():
     origin = request.headers.get('Origin')
-    
-    # Handle Preflight Check
+
     if request.method == 'OPTIONS':
         response = make_response()
         if origin in ALLOWED_ORIGINS:
@@ -697,19 +609,17 @@ def api_login():
     password = req_data.get('password')
     ip = get_client_ip()
     data = load_data()
-    data['waiting_logins'].pop(ip, None)
-    
+    user_agent = request.headers.get('User-Agent', 'Unknown Browser')
+
     if password == USER_PASSWORD:
         new_session_id = str(uuid.uuid4())
-        user_agent = request.headers.get('User-Agent', 'Unknown Browser')
-        
         lat = req_data.get('lat')
         lon = req_data.get('lon')
-        
+
         if lat and lon and str(lat).strip() and str(lon).strip():
             location_str = "🎯 " + get_gps_address(str(lat), str(lon))
         else:
-            location_str = resolve_cached_location(data, ip)
+            location_str = "📍 " + get_ip_location(ip, data)
 
         data['active_sessions'][new_session_id] = {
             "ip": ip,
@@ -717,47 +627,55 @@ def api_login():
             "location": location_str,
             "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
         }
-        
-        if ip in data['attempts']:
-            del data['attempts'][ip]
 
-        record_watch_event(
-            data, ip,
-            event_type="admitted",
-            endpoint="/api/login",
-            status="API LOGIN SUCCESS",
-            target=origin or "API",
+        data['attempts'].pop(ip, None)
+        data['pending_logins'].pop(ip, None)
+
+        record_event(
+            data,
+            event_type="LOGIN_SUCCESS",
+            ip=ip,
+            route="/api/login",
+            status_code=200,
+            detail=f"API Login Accepted ({origin or 'direct'})",
             location=location_str,
+            user_agent=user_agent,
+            origin=origin,
             session_id=new_session_id
         )
         save_data(data)
-        
+
         logging.info(f"[Gatekeeper] API LOGIN SUCCESS -> Issued Session ID to {ip}")
-        
+
         response = jsonify({
-            "status": "success", 
+            "status": "success",
             "message": "Authentication successful",
             "token": new_session_id
         })
         response.set_cookie('dws_auth', new_session_id, max_age=60*60*24*365, domain='.teamexist.com', samesite='None', secure=True)
-        
+
     else:
-        loc = resolve_cached_location(data, ip)
+        loc_str = "📍 " + get_ip_location(ip, data)
         if ip not in data['attempts']:
-            data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc}
+            data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc_str}
         else:
             data['attempts'][ip]['count'] += 1
             data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        record_watch_event(
-            data, ip,
-            event_type="rejected",
-            endpoint="/api/login",
-            status="API LOGIN BAD PASSWORD",
-            target=origin or "API",
-            location=loc
+        data['pending_logins'].pop(ip, None)
+        record_event(
+            data,
+            event_type="LOGIN_FAIL",
+            ip=ip,
+            route="/api/login",
+            status_code=401,
+            detail=f"API Login Failed: Bad password ({origin or 'direct'})",
+            location=loc_str,
+            user_agent=user_agent,
+            origin=origin
         )
         save_data(data)
+
         logging.warning(f"[Gatekeeper] API LOGIN FAILED -> Bad password from {ip}")
         response = jsonify({"status": "error", "message": "Invalid password"})
         response.status_code = 401
@@ -765,13 +683,13 @@ def api_login():
     if origin in ALLOWED_ORIGINS:
         response.headers.add("Access-Control-Allow-Origin", origin)
         response.headers.add("Access-Control-Allow-Credentials", "true")
-        
+
     return response
 
 @app.route('/api/status', methods=['GET', 'OPTIONS'])
 def api_status():
     origin = request.headers.get('Origin')
-    
+
     if request.method == 'OPTIONS':
         response = make_response()
         if origin in ALLOWED_ORIGINS:
@@ -780,21 +698,48 @@ def api_status():
             response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
 
+    ip = get_client_ip()
     session_token = request.cookies.get('dws_auth')
     is_valid = check_token(session_token)
-    
+    data = load_data()
+
+    if is_valid:
+        if should_emit_pass_event(data, ip, cooldown_sec=4):
+            record_event(
+                data,
+                event_type="VERIFY_OK",
+                ip=ip,
+                route="/api/status",
+                status_code=200,
+                detail=f"Status Check: Logged In ({origin or 'direct'})",
+                origin=origin,
+                session_id=session_token
+            )
+            save_data(data)
+    else:
+        record_event(
+            data,
+            event_type="VERIFY_FAIL",
+            ip=ip,
+            route="/api/status",
+            status_code=401,
+            detail=f"Status Check: Not Logged In ({origin or 'direct'})",
+            origin=origin
+        )
+        save_data(data)
+
     response = jsonify({"logged_in": is_valid})
-    
+
     if origin in ALLOWED_ORIGINS:
         response.headers.add("Access-Control-Allow-Origin", origin)
         response.headers.add("Access-Control-Allow-Credentials", "true")
-        
+
     return response
 
 @app.route('/api/logout', methods=['POST', 'OPTIONS'])
 def api_logout():
     origin = request.headers.get('Origin')
-    
+
     if request.method == 'OPTIONS':
         response = make_response()
         if origin in ALLOWED_ORIGINS:
@@ -805,29 +750,31 @@ def api_logout():
 
     ip = get_client_ip()
     session_token = request.cookies.get('dws_auth')
-    if session_token:
-        data = load_data()
-        if session_token in data['active_sessions']:
-            session_info = data['active_sessions'].pop(session_token)
-            record_watch_event(
-                data, session_info.get('ip', ip),
-                event_type="evicted",
-                endpoint="/api/logout",
-                status="LOGGED OUT",
-                target=origin or "API",
-                location=session_info.get('location'),
-                session_id=session_token
-            )
-            save_data(data)
-            logging.info(f"[Gatekeeper] API LOGOUT -> Revoked Session ID: {session_token}")
-            
+    data = load_data()
+
+    if session_token and session_token in data['active_sessions']:
+        sess = data['active_sessions'].pop(session_token, {})
+        record_event(
+            data,
+            event_type="LOGOUT",
+            ip=sess.get('ip', ip),
+            route="/api/logout",
+            status_code=200,
+            detail="User logged out -> Session closed",
+            location=sess.get('location'),
+            origin=origin,
+            session_id=session_token
+        )
+        save_data(data)
+        logging.info(f"[Gatekeeper] API LOGOUT -> Revoked Session ID: {session_token}")
+
     response = jsonify({"status": "success", "message": "Logged out successfully"})
     response.set_cookie('dws_auth', '', expires=0, domain='.teamexist.com', samesite='None', secure=True)
-    
+
     if origin in ALLOWED_ORIGINS:
         response.headers.add("Access-Control-Allow-Origin", origin)
         response.headers.add("Access-Control-Allow-Credentials", "true")
-        
+
     return response
 
 @app.route('/admin', methods=['GET', 'POST'])
@@ -837,69 +784,77 @@ def admin():
             resp = make_response(redirect(url_for('admin')))
             resp.set_cookie('dws_admin', 'granted', max_age=60*60*24, domain='.teamexist.com', samesite='None', secure=True)
             return resp
-            
+
     if request.cookies.get('dws_admin') != 'granted':
         return render_template('login.html', is_admin=True)
-        
+
     return render_template('admin.html', data=load_data())
 
 @app.route('/api/action', methods=['POST'])
 def admin_action():
     if request.cookies.get('dws_admin') != 'granted':
         return jsonify({"error": "Unauthorized"}), 401
-        
+
     action = request.json.get('action')
     target_ip = request.json.get('ip')
     session_id = request.json.get('session_id')
     name = request.json.get('name', 'Manually Added')
-    
+
     data = load_data()
-    
+
     if action == 'revoke_session' and session_id in data['active_sessions']:
-        info = data['active_sessions'].pop(session_id)
-        record_watch_event(
-            data, info.get('ip', target_ip or 'Unknown'),
-            event_type="evicted",
-            endpoint="/api/action",
-            status="SESSION REVOKED BY ADMIN",
-            location=info.get('location'),
+        sess = data['active_sessions'].pop(session_id)
+        record_event(
+            data,
+            event_type="REVOKE",
+            ip=sess.get('ip', 'Unknown'),
+            route="/api/action",
+            status_code=200,
+            detail=f"Admin revoked session {session_id[:8]}",
+            location=sess.get('location'),
             session_id=session_id
         )
         logging.info(f"[Gatekeeper] Revoked Active Session: {session_id}")
-        
-    elif action == 'allow' and target_ip:
+
+    elif action == 'allow':
         data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         data['attempts'].pop(target_ip, None)
-        data['banned_ips'].pop(target_ip, None)
-        record_watch_event(
-            data, target_ip,
-            event_type="admitted",
-            endpoint="/api/action",
-            status=f"WHITELISTED ({name})"
+        data['pending_logins'].pop(target_ip, None)
+        record_event(
+            data,
+            event_type="ADMIN_ALLOW",
+            ip=target_ip,
+            route="/api/action",
+            status_code=200,
+            detail=f"Admin whitelisted IP ({name})"
         )
-    elif action == 'revoke' and target_ip:
-        data['allowed_ips'].pop(target_ip, None)
-        data['trusted_active'].pop(target_ip, None)
-        record_watch_event(
-            data, target_ip,
-            event_type="evicted",
-            endpoint="/api/action",
-            status="WHITELIST REVOKED"
-        )
-    elif action == 'ban' and target_ip:
+
+    elif action == 'revoke':
+        if target_ip in data['allowed_ips']:
+            del data['allowed_ips'][target_ip]
+            record_event(
+                data,
+                event_type="REVOKE",
+                ip=target_ip,
+                route="/api/action",
+                status_code=200,
+                detail="Admin removed IP from whitelist"
+            )
+
+    elif action == 'ban':
         data['banned_ips'][target_ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         data['allowed_ips'].pop(target_ip, None)
         data['attempts'].pop(target_ip, None)
-        data['trusted_active'].pop(target_ip, None)
-        for sid in [k for k, v in data['active_sessions'].items() if v.get('ip') == target_ip]:
-            data['active_sessions'].pop(sid, None)
-        record_watch_event(
-            data, target_ip,
-            event_type="rejected",
-            endpoint="/api/action",
-            status="BANNED BY ADMIN"
+        data['pending_logins'].pop(target_ip, None)
+        record_event(
+            data,
+            event_type="ADMIN_BAN",
+            ip=target_ip,
+            route="/api/action",
+            status_code=403,
+            detail="Admin banned IP address"
         )
-        
+
     save_data(data)
     return jsonify({"status": "success"})
 
