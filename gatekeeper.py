@@ -32,13 +32,16 @@ app.secret_key = 'weqr1234'
 USER_PASSWORD = "weqr1234"
 ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
-MAX_EVENTS = 100
+MAX_EVENTS = 120
+MAX_FAILED_HISTORY = 250
 
 TRUSTED_IPS = [
     "127.0.0.1",
     "192.168.2.91",
     "172.18.0.1"
 ]
+
+FAILED_EVENT_TYPES = {"REJECT", "LOGIN_FAIL", "VERIFY_FAIL", "ADMIN_BAN"}
 
 # --- HELPER FUNCTIONS FOR GEOLOCATION ---
 def get_ip_location(ip, data=None):
@@ -93,11 +96,12 @@ def default_db_structure():
         "known_ips": {},
         "geo_cache": {},
         "events": [],
+        "failed_history": [],
         "last_event_id": 0
     }
 
 def record_event(data, event_type, ip, route, status_code, detail="", location=None, user_agent=None, origin=None, session_id=None):
-    """Appends a real network/auth event to the rolling telemetry queue."""
+    """Appends a real network/auth event to the live queue and archives failed attempts for replay."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not user_agent:
         user_agent = request.headers.get('User-Agent', 'Unknown Browser')
@@ -107,7 +111,6 @@ def record_event(data, event_type, ip, route, status_code, detail="", location=N
         existing_loc = data.get('known_ips', {}).get(ip, {}).get('location')
         location = existing_loc if existing_loc else ("📍 " + get_ip_location(ip, data))
 
-    # Maintain persistent metadata for known external/visitor IPs
     data.setdefault('known_ips', {})[ip] = {
         "ip": ip,
         "location": location,
@@ -122,7 +125,7 @@ def record_event(data, event_type, ip, route, status_code, detail="", location=N
 
     event_obj = {
         "id": next_id,
-        "type": event_type,       # AUTH_OK, REJECT, LOCK_WAIT, LOCK_ABANDON, LOGIN_SUCCESS, LOGIN_FAIL, VERIFY_OK, VERIFY_FAIL, LOGOUT, REVOKE, ADMIN_ALLOW, ADMIN_BAN
+        "type": event_type,
         "ip": ip,
         "route": route,
         "status": status_code,
@@ -139,6 +142,63 @@ def record_event(data, event_type, ip, route, status_code, detail="", location=N
     if len(events) > MAX_EVENTS:
         data['events'] = events[-MAX_EVENTS:]
 
+    # Permanently archive failed attempts so /watch can cycle past attempts with timestamps
+    if event_type in FAILED_EVENT_TYPES:
+        failed_hist = data.setdefault('failed_history', [])
+        failed_hist.append(event_obj)
+        if len(failed_hist) > MAX_FAILED_HISTORY:
+            data['failed_history'] = failed_hist[-MAX_FAILED_HISTORY:]
+
+def backfill_failed_history(data):
+    """Ensures any legacy attempts or banned IPs in access_log.json are seeded into failed_history."""
+    failed_hist = data.setdefault('failed_history', [])
+    existing_ips = {item.get('ip') for item in failed_hist}
+
+    # Backfill from events if needed
+    for ev in data.get('events', []):
+        if ev.get('type') in FAILED_EVENT_TYPES and ev not in failed_hist:
+            failed_hist.append(ev)
+            existing_ips.add(ev.get('ip'))
+
+    # Backfill from current/legacy attempts table
+    for ip, info in data.get('attempts', {}).items():
+        if ip not in existing_ips:
+            failed_hist.append({
+                "id": 0,
+                "type": "REJECT",
+                "ip": ip,
+                "route": "/auth",
+                "status": 401,
+                "detail": f"Past attempt ({info.get('count', 1)}x)",
+                "location": info.get('location', '📍 Unknown Location'),
+                "device_info": "Recorded in access_log.json",
+                "origin": "",
+                "session_id": "",
+                "time": info.get('time', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            })
+            existing_ips.add(ip)
+
+    # Backfill from banned_ips table
+    for ip, info in data.get('banned_ips', {}).items():
+        if ip not in existing_ips:
+            failed_hist.append({
+                "id": 0,
+                "type": "ADMIN_BAN",
+                "ip": ip,
+                "route": "/auth",
+                "status": 403,
+                "detail": "Banned IP address",
+                "location": data.get('known_ips', {}).get(ip, {}).get('location', '📍 Unknown Location'),
+                "device_info": "Banned in access_log.json",
+                "origin": "",
+                "session_id": "",
+                "time": info.get('time', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            })
+            existing_ips.add(ip)
+
+    if len(failed_hist) > MAX_FAILED_HISTORY:
+        data['failed_history'] = failed_hist[-MAX_FAILED_HISTORY:]
+
 def cleanup_old_attempts(data):
     now = datetime.now()
     expired_ips = []
@@ -154,12 +214,11 @@ def cleanup_old_attempts(data):
     for ip in expired_ips:
         data['attempts'].pop(ip, None)
 
-    # Expire lock-screen waits if the user closed the tab or went idle > 75 seconds
     expired_pending = []
     for ip, info in list(data.get('pending_logins', {}).items()):
         try:
-            wait_Start = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
-            if now - wait_Start > timedelta(seconds=75):
+            wait_start = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
+            if now - wait_start > timedelta(seconds=75):
                 expired_pending.append((ip, info))
         except (ValueError, KeyError, TypeError):
             expired_pending.append((ip, {}))
@@ -199,6 +258,7 @@ def load_data():
         if key not in data or not isinstance(data[key], type(default_val)):
             data[key] = default_val
 
+    backfill_failed_history(data)
     return cleanup_old_attempts(data)
 
 def save_data(data):
@@ -220,7 +280,6 @@ def get_client_ip():
     return (forwarded_ip or "127.0.0.1").split(',')[0].strip()
 
 def should_emit_pass_event(data, ip, cooldown_sec=4):
-    """Prevents static asset bursts (CSS/JS/images) from spamming 30 identical pass events in 1 second."""
     now = datetime.now()
     for ev in reversed(data.get('events', [])):
         if ev.get('ip') == ip and ev.get('type') in ('AUTH_OK', 'VERIFY_OK'):
@@ -259,7 +318,6 @@ def api_telemetry():
 
     since_id = request.args.get('since', default=0, type=int)
     data = load_data()
-    # Save if cleanup_old_attempts expired any pending_logins
     save_data(data)
 
     new_events = [ev for ev in data.get('events', []) if ev.get('id', 0) > since_id]
@@ -273,6 +331,7 @@ def api_telemetry():
         "attempts": data.get('attempts', {}),
         "pending_logins": data.get('pending_logins', {}),
         "known_ips": data.get('known_ips', {}),
+        "failed_history": data.get('failed_history', []),
         "events": new_events
     }
 
@@ -284,7 +343,6 @@ def api_telemetry():
 
 @app.route('/api/login_leave', methods=['POST'])
 def api_login_leave():
-    """Triggered when a user closes the /login lock screen without authenticating."""
     ip = get_client_ip()
     data = load_data()
     if ip in data.get('pending_logins', {}):
@@ -307,7 +365,6 @@ def auth():
     ip = get_client_ip()
     target_url = request.headers.get('X-Original-URI', 'Unknown URL')
 
-    # Do not generate self-traffic when viewing the /watch visualizer
     if any(target_url.startswith(p) for p in ('/watch', '/homebase', '/api/telemetry', '/api/login_leave')):
         return "OK", 200
 
@@ -454,7 +511,6 @@ def login():
             logging.warning(f"[Gatekeeper] LOGIN FAILED -> Bad password from {ip}")
 
     else:
-        # GET /login -> Visitor is currently sitting at the lock screen waiting to enter password
         loc_str = "📍 " + get_ip_location(ip, data)
         data['pending_logins'][ip] = {
             "ip": ip,
