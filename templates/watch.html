@@ -26,7 +26,7 @@
       cursor: crosshair;
     }
 
-    /* Minimal passive telemetry overlay (zero buttons/options) */
+    /* Passive telemetry overlay (zero options) */
     .hud-top-left {
       position: fixed;
       top: 20px;
@@ -78,7 +78,7 @@
       display: flex;
       flex-direction: column-reverse;
       gap: 5px;
-      max-width: 520px;
+      max-width: 580px;
     }
     .feed-line {
       font-size: 11px;
@@ -88,6 +88,9 @@
       overflow: hidden;
       text-overflow: ellipsis;
       animation: fadeIn 0.25s ease-out;
+    }
+    .feed-line.past-replay {
+      opacity: 0.48;
     }
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(4px); }
@@ -103,8 +106,8 @@
       background: rgba(6, 6, 9, 0.94);
       border: 1px solid rgba(255, 255, 255, 0.22);
       padding: 12px 14px;
-      min-width: 255px;
-      max-width: 340px;
+      min-width: 265px;
+      max-width: 350px;
       box-shadow: 0 12px 32px rgba(0, 0, 0, 0.9), 0 0 18px rgba(0, 0, 0, 0.65);
       backdrop-filter: blur(8px);
       transition: opacity 0.12s ease;
@@ -160,13 +163,13 @@
 
   <div class="hud-top-left">
     <div id="connDot" class="pulse-dot"></div>
-    <span id="connText">AUTH.TEAMEXIST.COM // LIVE TELEMETRY</span>
+    <span id="connText">AUTH.TEAMEXIST.COM // LIVE + ARCHIVE REPLAY</span>
   </div>
 
   <div class="hud-top-right">
     <div class="stat-item">INSIDE<span id="statInside">0</span></div>
     <div class="stat-item">LOCK SCREEN<span id="statWaiting">0</span></div>
-    <div class="stat-item">ATTEMPTS<span id="statAttempts">0</span></div>
+    <div class="stat-item">PAST FAILED<span id="statPastFailed">0</span></div>
     <div class="stat-item">BANNED<span id="statBanned">0</span></div>
   </div>
 
@@ -194,7 +197,6 @@
     let H = window.innerHeight;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-    // Central HomeBase square geometry
     const hb = {
       x: W / 2,
       y: H / 2,
@@ -205,7 +207,7 @@
       shakeVY: 0,
       greenGlow: 0,
       redGlow: 0,
-      gateSide: null, // 'top', 'bottom', 'left', 'right'
+      gateSide: null,
       gatePos: 0,
       gateOpen: 0
     };
@@ -223,7 +225,6 @@
     window.addEventListener('resize', resize);
     resize();
 
-    // 4 Corner Cloud Centers (leaves clean space around HomeBase and screen edges)
     function getCornerAnchor(cornerIdx) {
       const padX = Math.max(130, W * 0.14);
       const padY = Math.max(120, H * 0.16);
@@ -235,16 +236,17 @@
       }
     }
 
-    // Entity Registry & Ambient Corner Cloud Nodes
-    // States: 'CLOUD', 'FLYING_IN', 'WAITING_LOCK', 'ENTERING', 'INSIDE', 'REJECTED_OUT'
     const squares = [];
-    const entityByKey = new Map(); // Maps IP or Session Key -> Square object
+    const entityByKey = new Map();
     const particles = [];
     const shockwaves = [];
 
-    // Create 36 ambient corner-cloud squares (9 in each of the 4 corners)
-    // These spin freely and bump into each other in the corners.
-    // When a new real IP connects, it claims one of these squares!
+    // Queue of real historical failed attempts to cycle through
+    const pastFailedQueue = [];
+    const pastFailedSeenKeys = new Set();
+    let replayCursor = 0;
+
+    // 36 ambient corner-cloud squares
     const AMBIENT_COUNT = 36;
     for (let i = 0; i < AMBIENT_COUNT; i++) {
       const corner = i % 4;
@@ -253,8 +255,10 @@
       const radius = 28 + Math.random() * 68;
       squares.push({
         id: `ambient_${i}`,
-        key: null, // Unclaimed until a real IP claims it
+        key: null,
         isClaimed: false,
+        isPastReplay: false,
+        replayStamp: '',
         state: 'CLOUD',
         corner,
         orbitRadius: radius,
@@ -270,7 +274,6 @@
         color: '#8892b0',
         trail: [],
         pulse: 0,
-        // Metadata
         ip: 'Unassigned Node',
         badge: 'CLOUD IDLE',
         badgeColor: '#64748b',
@@ -284,10 +287,7 @@
     }
 
     function claimOrGetSquare(key, ip, preferInside = false) {
-      if (entityByKey.has(key)) {
-        return entityByKey.get(key);
-      }
-      // Also check if there is already an entity for this raw IP
+      if (entityByKey.has(key)) return entityByKey.get(key);
       if (entityByKey.has(ip)) {
         const sq = entityByKey.get(ip);
         entityByKey.set(key, sq);
@@ -295,7 +295,6 @@
         return sq;
       }
 
-      // Claim an unclaimed ambient square in the corner cloud
       let candidate = squares.find(s => !s.isClaimed && s.state === 'CLOUD');
       if (!candidate) {
         const corner = squares.length % 4;
@@ -304,11 +303,13 @@
           id: `real_${Date.now()}_${Math.random()}`,
           key,
           isClaimed: true,
+          isPastReplay: false,
+          replayStamp: '',
           state: preferInside ? 'INSIDE' : 'CLOUD',
           corner,
           orbitRadius: 35 + Math.random() * 60,
           orbitAngle: Math.random() * Math.PI * 2,
-          orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * 0.006,
+          orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * (0.006),
           x: preferInside ? hb.x + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.x,
           y: preferInside ? hb.y + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.y,
           vx: (Math.random() - 0.5) * 1.2,
@@ -348,7 +349,15 @@
       return candidate;
     }
 
-    // Pick closest point on the outer edge of HomeBase for a square to fly to
+    function addFailedEventToReplayQueue(ev) {
+      if (!ev || !['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) return;
+      const sig = `${ev.id || 0}_${ev.ip}_${ev.time}_${ev.route}`;
+      if (pastFailedSeenKeys.has(sig)) return;
+      pastFailedSeenKeys.add(sig);
+      pastFailedQueue.push(ev);
+      document.getElementById('statPastFailed').textContent = pastFailedQueue.length;
+    }
+
     function getHomeBaseEdgeTarget(sq) {
       const half = hb.size / 2;
       const dx = sq.x - hb.x;
@@ -367,19 +376,19 @@
       }
     }
 
-    function spawnSparks(x, y, color, count = 18) {
+    function spawnSparks(x, y, color, count = 18, alphaScale = 1.0) {
       for (let i = 0; i < count; i++) {
         const a = Math.random() * Math.PI * 2;
-        const spd = 1.5 + Math.random() * 5.5;
+        const spd = (1.2 + Math.random() * 4.8) * (alphaScale < 0.7 ? 0.7 : 1.0);
         particles.push({
           x,
           y,
           vx: Math.cos(a) * spd,
           vy: Math.sin(a) * spd,
-          life: 1,
-          decay: 0.022 + Math.random() * 0.025,
+          life: alphaScale,
+          decay: 0.024 + Math.random() * 0.025,
           color,
-          size: 2 + Math.random() * 2.5
+          size: 2 + Math.random() * 2.2
         });
       }
     }
@@ -398,59 +407,90 @@
         alpha: 0.75,
         color: '#00ff88'
       });
-      spawnSparks(sq.x, sq.y, '#00ff88', 14);
+      spawnSparks(sq.x, sq.y, '#00ff88', 14, 1.0);
     }
 
-    function triggerRedReject(sq) {
-      hb.redGlow = 1.0;
-      // Sharp recoil impulse on HomeBase
+    function triggerRedReject(sq, isPastReplay = false) {
       const angle = Math.atan2(hb.y - sq.y, hb.x - sq.x);
-      hb.shakeVX += Math.cos(angle) * 15 + (Math.random() - 0.5) * 10;
-      hb.shakeVY += Math.sin(angle) * 15 + (Math.random() - 0.5) * 10;
 
-      shockwaves.push({
-        x: hb.x,
-        y: hb.y,
-        size: hb.size,
-        alpha: 0.85,
-        color: '#ff2244'
-      });
-      spawnSparks(sq.x, sq.y, '#ff2244', 24);
+      if (isPastReplay) {
+        // Dimmer, softer red pulse & micro-shake for past attempt replays
+        hb.redGlow = Math.max(hb.redGlow, 0.38);
+        hb.shakeVX += Math.cos(angle) * 5.5 + (Math.random() - 0.5) * 3.5;
+        hb.shakeVY += Math.sin(angle) * 5.5 + (Math.random() - 0.5) * 3.5;
 
-      // Fling the rejected square back toward its corner cloud with fast spin
-      sq.state = 'REJECTED_OUT';
-      sq.color = '#ff2244';
-      sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.28;
+        shockwaves.push({
+          x: hb.x,
+          y: hb.y,
+          size: hb.size,
+          alpha: 0.32,
+          color: '#9e2a3b'
+        });
+        spawnSparks(sq.x, sq.y, '#b83348', 10, 0.48);
+
+        sq.state = 'REJECTED_OUT';
+        sq.color = '#9e2a3b';
+        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.16;
+      } else {
+        // Full-force neon red flash & shake for LIVE failed attempts
+        hb.redGlow = 1.0;
+        hb.shakeVX += Math.cos(angle) * 15 + (Math.random() - 0.5) * 10;
+        hb.shakeVY += Math.sin(angle) * 15 + (Math.random() - 0.5) * 10;
+
+        shockwaves.push({
+          x: hb.x,
+          y: hb.y,
+          size: hb.size,
+          alpha: 0.85,
+          color: '#ff2244'
+        });
+        spawnSparks(sq.x, sq.y, '#ff2244', 24, 1.0);
+
+        sq.state = 'REJECTED_OUT';
+        sq.color = '#ff2244';
+        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.28;
+      }
+
       const anchor = getCornerAnchor(sq.corner);
       const backAngle = Math.atan2(anchor.y - sq.y, anchor.x - sq.x);
-      sq.vx = Math.cos(backAngle) * 8.5;
-      sq.vy = Math.sin(backAngle) * 8.5;
+      const recoilSpd = isPastReplay ? 5.5 : 8.5;
+      sq.vx = Math.cos(backAngle) * recoilSpd;
+      sq.vy = Math.sin(backAngle) * recoilSpd;
     }
 
-    // Event Feed Log (Bottom-Left)
     const feedEl = document.getElementById('eventFeed');
-    function pushFeedLine(ev) {
+    function pushFeedLine(ev, isPastReplay = false) {
       const div = document.createElement('div');
-      div.className = 'feed-line';
+      div.className = isPastReplay ? 'feed-line past-replay' : 'feed-line';
       let color = '#94a3b8';
       if (['LOGIN_SUCCESS', 'AUTH_OK', 'VERIFY_OK', 'ADMIN_ALLOW'].includes(ev.type)) color = '#00ff88';
-      else if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) color = '#ff3355';
-      else if (['LOCK_WAIT', 'LOCK_ABANDON'].includes(ev.type)) color = '#ffbe0b';
+      else if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) {
+        color = isPastReplay ? '#b84a59' : '#ff3355';
+      } else if (['LOCK_WAIT', 'LOCK_ABANDON'].includes(ev.type)) color = '#ffbe0b';
 
-      const timeOnly = (ev.time || '').split(' ')[1] || ev.time;
-      div.innerHTML = `<span style="color:rgba(255,255,255,0.35)">[${timeOnly}]</span> <span style="color:${color};font-weight:700">${ev.type}</span> <span style="color:#fff">${ev.ip}</span> <span style="color:rgba(255,255,255,0.45)">${ev.route} — ${ev.detail || ''}</span>`;
+      const stamp = ev.time || '--';
+      const prefix = isPastReplay ? `[PAST // ${stamp}]` : `[LIVE // ${stamp.split(' ')[1] || stamp}]`;
+      div.innerHTML = `<span style="color:rgba(255,255,255,0.38)">${prefix}</span> <span style="color:${color};font-weight:700">${ev.type}</span> <span style="color:#fff">${ev.ip}</span> <span style="color:rgba(255,255,255,0.45)">${ev.route} — ${ev.detail || ''}</span>`;
       feedEl.prepend(div);
-      while (feedEl.children.length > 5) {
+      while (feedEl.children.length > 6) {
         feedEl.removeChild(feedEl.lastChild);
       }
     }
 
-    // Handle a real event emitted by gatekeeper.py
-    function handleRealEvent(ev) {
-      pushFeedLine(ev);
+    // Trigger a live event from gatekeeper.py
+    function handleLiveEvent(ev) {
+      pushFeedLine(ev, false);
+
+      // Archive any new failed event into the replay cycle as well
+      if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) {
+        addFailedEventToReplayQueue(ev);
+      }
+
       const key = ev.session_id || ev.ip;
       const sq = claimOrGetSquare(key, ev.ip, false);
 
+      sq.isPastReplay = false;
+      sq.replayStamp = '';
       sq.ip = ev.ip;
       sq.location = ev.location || sq.location;
       sq.route = ev.route || sq.route;
@@ -459,18 +499,16 @@
       sq.time = ev.time || sq.time;
       if (ev.session_id) sq.sessionId = ev.session_id;
 
-      // If the square is already INSIDE and hits /auth or /api/verify or /api/status with 200 OK
       if (sq.state === 'INSIDE' && ['AUTH_OK', 'VERIFY_OK'].includes(ev.type)) {
         sq.pulse = 1.0;
         sq.color = '#00ff88';
-        sq.badge = 'ACTIVE SESSION';
+        sq.badge = 'ACTIVE SESSION (LIVE)';
         sq.badgeColor = '#00ff88';
         hb.greenGlow = Math.max(hb.greenGlow, 0.55);
-        spawnSparks(sq.x, sq.y, '#00ff88', 8);
+        spawnSparks(sq.x, sq.y, '#00ff88', 8, 1.0);
         return;
       }
 
-      // If visitor opened GET /login -> Fly to the edge of HomeBase and wait there
       if (ev.type === 'LOCK_WAIT') {
         const edge = getHomeBaseEdgeTarget(sq);
         sq.targetX = edge.x;
@@ -480,12 +518,11 @@
         sq.afterFlight = 'WAIT_AT_LOCK';
         sq.state = 'FLYING_IN';
         sq.color = '#ffbe0b';
-        sq.badge = 'AT LOCK SCREEN';
+        sq.badge = 'AT LOCK SCREEN (LIVE)';
         sq.badgeColor = '#ffbe0b';
         return;
       }
 
-      // If visitor closed the lock screen or timed out -> Fly away back to corner cloud
       if (ev.type === 'LOCK_ABANDON') {
         sq.badge = 'LEFT LOCK SCREEN';
         sq.badgeColor = '#94a3b8';
@@ -495,7 +532,6 @@
         return;
       }
 
-      // If user logged out or admin revoked/banned them while inside -> Eject from HomeBase
       if (['LOGOUT', 'REVOKE', 'ADMIN_BAN'].includes(ev.type)) {
         sq.badge = ev.type === 'ADMIN_BAN' ? 'BANNED IP' : 'DISCONNECTED';
         sq.badgeColor = ev.type === 'ADMIN_BAN' ? '#ff2244' : '#94a3b8';
@@ -504,12 +540,12 @@
         sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.2;
         if (ev.type === 'ADMIN_BAN') {
           hb.redGlow = 0.8;
-          spawnSparks(sq.x, sq.y, '#ff2244', 16);
+          spawnSparks(sq.x, sq.y, '#ff2244', 16, 1.0);
         }
         return;
       }
 
-      // Allowed in (LOGIN_SUCCESS, AUTH_OK, VERIFY_OK, ADMIN_ALLOW)
+      // Live Authorized Pass (NEVER replayed from history, strictly live)
       if (['LOGIN_SUCCESS', 'AUTH_OK', 'VERIFY_OK', 'ADMIN_ALLOW'].includes(ev.type)) {
         const edge = getHomeBaseEdgeTarget(sq);
         sq.targetX = edge.x;
@@ -517,11 +553,10 @@
         sq.targetSide = edge.side;
         sq.targetGatePos = edge.gatePos;
         sq.afterFlight = 'ALLOW_IN';
-        sq.badge = 'AUTHORIZED';
+        sq.badge = 'AUTHORIZED (LIVE)';
         sq.badgeColor = '#00ff88';
         sq.color = '#00ff88';
 
-        // If already waiting right at the lock screen edge, enter immediately!
         if (sq.state === 'WAITING_LOCK') {
           triggerGreenPass(sq, { side: sq.targetSide, gatePos: sq.targetGatePos });
           sq.state = 'ENTERING';
@@ -531,7 +566,7 @@
         return;
       }
 
-      // Rejected (REJECT, LOGIN_FAIL, VERIFY_FAIL)
+      // Live Rejected Attempt
       if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL'].includes(ev.type)) {
         const edge = getHomeBaseEdgeTarget(sq);
         sq.targetX = edge.x;
@@ -539,12 +574,11 @@
         sq.targetSide = edge.side;
         sq.targetGatePos = edge.gatePos;
         sq.afterFlight = 'REJECT_OUT';
-        sq.badge = ev.status === 403 ? 'BANNED (403)' : 'BLOCKED (401)';
+        sq.badge = ev.status === 403 ? 'LIVE BANNED (403)' : 'LIVE BLOCKED (401)';
         sq.badgeColor = '#ff2244';
 
-        // If waiting at the lock screen edge and typed the wrong password, shake & reject immediately!
         if (sq.state === 'WAITING_LOCK') {
-          triggerRedReject(sq);
+          triggerRedReject(sq, false);
         } else {
           sq.color = '#ffaa00';
           sq.state = 'FLYING_IN';
@@ -552,7 +586,43 @@
       }
     }
 
-    // Reconcile full snapshot from /api/telemetry with visual entities
+    // Cycle Past Failed Attempts with Dimmer Color & Timestamp
+    function triggerNextPastFailedReplay() {
+      if (pastFailedQueue.length === 0) return;
+
+      const ev = pastFailedQueue[replayCursor % pastFailedQueue.length];
+      replayCursor = (replayCursor + 1) % pastFailedQueue.length;
+
+      const sq = claimOrGetSquare(ev.ip, ev.ip, false);
+      // Do not interrupt a square if that IP is currently inside, waiting at lock screen, or mid-live-flight
+      if (sq.state !== 'CLOUD') return;
+
+      sq.isPastReplay = true;
+      sq.replayStamp = ev.time || 'PAST ATTEMPT';
+      sq.ip = ev.ip;
+      sq.location = ev.location || sq.location;
+      sq.route = ev.route || '/auth';
+      sq.detail = ev.detail || 'Past failed attempt';
+      sq.device = ev.device_info || sq.device;
+      sq.time = ev.time || '--';
+      sq.badge = `PAST ${ev.type} (REPLAY)`;
+      sq.badgeColor = '#b84a59';
+      sq.color = '#9e2a3b';
+
+      const edge = getHomeBaseEdgeTarget(sq);
+      sq.targetX = edge.x;
+      sq.targetY = edge.y;
+      sq.targetSide = edge.side;
+      sq.targetGatePos = edge.gatePos;
+      sq.afterFlight = 'REJECT_OUT';
+      sq.state = 'FLYING_IN';
+
+      pushFeedLine(ev, true);
+    }
+
+    // Continuously cycle past failed attempts every 3.2 seconds
+    setInterval(triggerNextPastFailedReplay, 3200);
+
     let lastEventId = 0;
     let firstSync = true;
 
@@ -570,18 +640,23 @@
         const attempts = data.attempts || {};
         const bannedIps = data.banned_ips || {};
         const knownIps = data.known_ips || {};
+        const failedHistory = data.failed_history || [];
 
-        // Update top-right counters
         const insideCount = Object.keys(activeSessions).length + Object.keys(allowedIps).length;
         document.getElementById('statInside').textContent = insideCount;
         document.getElementById('statWaiting').textContent = Object.keys(pendingLogins).length;
-        document.getElementById('statAttempts').textContent = Object.keys(attempts).length;
         document.getElementById('statBanned').textContent = Object.keys(bannedIps).length;
 
+        // Sync historical failed attempts into the replay cycle
+        for (const fEv of failedHistory) {
+          addFailedEventToReplayQueue(fEv);
+        }
+
         if (firstSync) {
-          // On initial page load, place all currently active sessions & whitelisted IPs inside HomeBase
+          // Place currently active real sessions inside HomeBase
           for (const [sessId, info] of Object.entries(activeSessions)) {
             const sq = claimOrGetSquare(sessId, info.ip || 'Session', true);
+            sq.isPastReplay = false;
             sq.state = 'INSIDE';
             sq.color = '#00ff88';
             sq.badge = 'ACTIVE SESSION';
@@ -596,6 +671,7 @@
 
           for (const [ip, info] of Object.entries(allowedIps)) {
             const sq = claimOrGetSquare(`allow_${ip}`, ip, true);
+            sq.isPastReplay = false;
             sq.state = 'INSIDE';
             sq.color = '#00e5ff';
             sq.badge = 'WHITELISTED IP';
@@ -606,7 +682,6 @@
             sq.route = '/auth';
           }
 
-          // Place any currently waiting lock-screen visitors on the HomeBase perimeter
           for (const [ip, info] of Object.entries(pendingLogins)) {
             const sq = claimOrGetSquare(ip, ip, false);
             const edge = getHomeBaseEdgeTarget(sq);
@@ -625,7 +700,6 @@
             sq.detail = 'Waiting for password input';
           }
 
-          // Populate outer corner clouds with real attempts, banned IPs, and known IPs
           for (const [ip, info] of Object.entries(knownIps)) {
             if (!entityByKey.has(ip)) {
               const sq = claimOrGetSquare(ip, ip, false);
@@ -633,17 +707,19 @@
               sq.device = info.device_info || '--';
               sq.route = info.last_route || '--';
               sq.time = info.last_seen || '--';
-              sq.badge = 'RECENT VISITOR';
-              sq.badgeColor = '#94a3b8';
+              sq.badge = 'PAST VISITOR';
+              sq.badgeColor = '#64748b';
             }
           }
 
           for (const [ip, info] of Object.entries(attempts)) {
             const sq = claimOrGetSquare(ip, ip, false);
             if (sq.state === 'CLOUD') {
-              sq.color = '#ff5566';
-              sq.badge = `ATTEMPTS (${info.count})`;
-              sq.badgeColor = '#ff5566';
+              sq.color = '#9e2a3b';
+              sq.isPastReplay = true;
+              sq.replayStamp = info.time || '';
+              sq.badge = `PAST ATTEMPTS (${info.count})`;
+              sq.badgeColor = '#b84a59';
               sq.location = info.location || sq.location;
               sq.time = info.time || sq.time;
               sq.detail = `${info.count} failed attempt(s)`;
@@ -653,7 +729,9 @@
           for (const [ip, info] of Object.entries(bannedIps)) {
             const sq = claimOrGetSquare(ip, ip, false);
             if (sq.state === 'CLOUD') {
-              sq.color = '#ff2244';
+              sq.color = '#9e2a3b';
+              sq.isPastReplay = true;
+              sq.replayStamp = info.time || '';
               sq.badge = 'BANNED IP';
               sq.badgeColor = '#ff2244';
               sq.time = info.time || '--';
@@ -661,18 +739,17 @@
             }
           }
 
-          // Show the last 4 historical events in the bottom-left ticker without re-animating old flights
-          const recent = (data.events || []).slice(-4);
-          recent.forEach(pushFeedLine);
           lastEventId = data.last_event_id || 0;
           firstSync = false;
+
+          // Kick off the first historical failed attempt replay right away
+          setTimeout(triggerNextPastFailedReplay, 900);
         } else {
-          // Process new real-time events
           const newEvents = data.events || [];
           for (const ev of newEvents) {
             if (ev.id > lastEventId) {
               lastEventId = ev.id;
-              handleRealEvent(ev);
+              handleLiveEvent(ev);
             }
           }
         }
@@ -684,7 +761,6 @@
     setInterval(pollTelemetry, 1000);
     pollTelemetry();
 
-    // Mouse Hover Tracking
     const mouse = { x: -9999, y: -9999 };
     let hoveredSquare = null;
     const tooltip = document.getElementById('tooltip');
@@ -698,7 +774,6 @@
       mouse.y = -9999;
     });
 
-    // 2D Elastic Square-to-Square Collision + Spin Transfer
     function resolveCollisions(group) {
       for (let i = 0; i < group.length; i++) {
         for (let j = i + 1; j < group.length; j++) {
@@ -718,7 +793,6 @@
             b.x += nx * overlap;
             b.y += ny * overlap;
 
-            // Exchange velocity along collision normal
             const kx = a.vx - b.vx;
             const ky = a.vy - b.vy;
             const p = kx * nx + ky * ny;
@@ -728,7 +802,6 @@
               b.vx += p * nx * 0.85;
               b.vy += p * ny * 0.85;
 
-              // Impart free angular spin when squares bump corners
               const spinKick = (Math.random() - 0.5) * 0.09;
               a.vAngle = Math.max(-0.22, Math.min(0.22, a.vAngle + spinKick));
               b.vAngle = Math.max(-0.22, Math.min(0.22, b.vAngle - spinKick));
@@ -739,7 +812,6 @@
     }
 
     function updatePhysics() {
-      // Damped spring physics for HomeBase red rejection shake
       const springK = 0.28;
       const damping = 0.72;
       hb.shakeVX = (hb.shakeVX - hb.shakeX * springK) * damping;
@@ -758,7 +830,6 @@
       let minHoverDist = 24;
 
       for (const sq of squares) {
-        // Check hover proximity
         const dMouse = Math.hypot(mouse.x - sq.x, mouse.y - sq.y);
         if (dMouse < minHoverDist) {
           minHoverDist = dMouse;
@@ -770,7 +841,6 @@
         const isHovered = (sq === hoveredSquare);
         const speedScale = isHovered ? 0.15 : 1.0;
 
-        // Free rotation + gentle angular damping back to lively spin
         sq.angle += sq.vAngle * speedScale;
         if (Math.abs(sq.vAngle) > 0.06) {
           sq.vAngle *= 0.985;
@@ -789,7 +859,6 @@
           sq.vx += (desiredX - sq.x) * 0.015;
           sq.vy += (desiredY - sq.y) * 0.015;
 
-          // Keep outer cloud squares outside the central HomeBase buffer zone
           const dxC = sq.x - hb.x;
           const dyC = sq.y - hb.y;
           const safeDist = hb.size * 0.85;
@@ -825,19 +894,19 @@
               triggerGreenPass(sq, { side: sq.targetSide, gatePos: sq.targetGatePos });
               sq.state = 'ENTERING';
             } else {
-              triggerRedReject(sq);
+              triggerRedReject(sq, sq.isPastReplay);
             }
           } else {
-            const spd = Math.min(9.5, Math.max(3.2, dist * 0.12));
+            const maxSpd = sq.isPastReplay ? 6.2 : 9.5;
+            const spd = Math.min(maxSpd, Math.max(2.6, dist * 0.11));
             sq.vx = (dx / dist) * spd;
             sq.vy = (dy / dist) * spd;
             sq.x += sq.vx;
             sq.y += sq.vy;
-            sq.vAngle = 0.14;
+            sq.vAngle = sq.isPastReplay ? 0.09 : 0.14;
           }
 
         } else if (sq.state === 'WAITING_LOCK') {
-          // Gently bob right at the outer edge of the HomeBase square outline
           sq.trail.length = 0;
           const edge = getHomeBaseEdgeTarget(sq);
           sq.x += (edge.x - sq.x) * 0.15;
@@ -865,7 +934,6 @@
           sq.x += sq.vx * speedScale;
           sq.y += sq.vy * speedScale;
 
-          // Keep gentle cruising momentum inside HomeBase
           const spd = Math.hypot(sq.vx, sq.vy);
           if (spd < 0.45) {
             sq.vx += (Math.random() - 0.5) * 0.25;
@@ -875,7 +943,6 @@
             sq.vy *= 0.96;
           }
 
-          // Bounce off the inside walls of the HomeBase square
           const minX = hb.x - half + innerPad;
           const maxX = hb.x + half - innerPad;
           const minY = hb.y - half + innerPad;
@@ -909,13 +976,11 @@
         }
       }
 
-      // Elastic collisions inside HomeBase and in the outer cloud
       const insideGroup = squares.filter(s => s.state === 'INSIDE');
       const cloudGroup = squares.filter(s => s.state === 'CLOUD');
       resolveCollisions(insideGroup);
       resolveCollisions(cloudGroup);
 
-      // Update particles & shockwaves
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         p.x += p.vx;
@@ -933,11 +998,10 @@
         if (sw.alpha <= 0) shockwaves.splice(i, 1);
       }
 
-      // Update Tooltip UI
       if (hoveredSquare) {
         tooltip.classList.add('visible');
-        const clampedX = Math.max(160, Math.min(W - 160, hoveredSquare.x));
-        const clampedY = Math.max(150, hoveredSquare.y - 14);
+        const clampedX = Math.max(165, Math.min(W - 165, hoveredSquare.x));
+        const clampedY = Math.max(155, hoveredSquare.y - 14);
         tooltip.style.left = `${clampedX}px`;
         tooltip.style.top = `${clampedY}px`;
 
@@ -960,7 +1024,6 @@
       const cy = hb.y + hb.shakeY;
       const half = hb.size / 2;
 
-      // Shockwave rings
       for (const sw of shockwaves) {
         ctx.save();
         ctx.strokeStyle = sw.color;
@@ -971,14 +1034,13 @@
       }
 
       ctx.save();
-      // Determine outline color & glow from green/red states
       let strokeColor = '#ffffff';
       let shadowColor = 'rgba(255,255,255,0.25)';
       let shadowBlur = 10;
       let lineWidth = 2;
 
       if (hb.redGlow > 0.01) {
-        strokeColor = '#ff2244';
+        strokeColor = hb.redGlow > 0.5 ? '#ff2244' : '#b83348';
         shadowColor = '#ff2244';
         shadowBlur = 35 * hb.redGlow;
         lineWidth = 2 + 2.5 * hb.redGlow;
@@ -994,10 +1056,8 @@
       ctx.shadowBlur = shadowBlur;
       ctx.lineWidth = lineWidth;
 
-      // Draw HomeBase square outline (with brief aperture opening when a square enters)
       const gapHalf = 14 * hb.gateOpen;
       ctx.beginPath();
-      // Top edge
       if (hb.gateOpen > 0.05 && hb.gateSide === 'top') {
         const gx = cx + hb.gatePos;
         ctx.moveTo(cx - half, cy - half);
@@ -1008,7 +1068,6 @@
         ctx.moveTo(cx - half, cy - half);
         ctx.lineTo(cx + half, cy - half);
       }
-      // Right edge
       if (hb.gateOpen > 0.05 && hb.gateSide === 'right') {
         const gy = cy + hb.gatePos;
         ctx.moveTo(cx + half, cy - half);
@@ -1019,7 +1078,6 @@
         ctx.moveTo(cx + half, cy - half);
         ctx.lineTo(cx + half, cy + half);
       }
-      // Bottom edge
       if (hb.gateOpen > 0.05 && hb.gateSide === 'bottom') {
         const gx = cx + hb.gatePos;
         ctx.moveTo(cx + half, cy + half);
@@ -1030,7 +1088,6 @@
         ctx.moveTo(cx + half, cy + half);
         ctx.lineTo(cx - half, cy + half);
       }
-      // Left edge
       if (hb.gateOpen > 0.05 && hb.gateSide === 'left') {
         const gy = cy + hb.gatePos;
         ctx.moveTo(cx - half, cy + half);
@@ -1043,9 +1100,8 @@
       }
       ctx.stroke();
 
-      // Center Label: "HomeBase"
       ctx.shadowBlur = 0;
-      ctx.fillStyle = hb.redGlow > 0.2 ? '#ff2244' : (hb.greenGlow > 0.2 ? '#00ff88' : '#ffffff');
+      ctx.fillStyle = hb.redGlow > 0.3 ? '#ff2244' : (hb.greenGlow > 0.2 ? '#00ff88' : '#ffffff');
       ctx.font = '600 18px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -1055,9 +1111,13 @@
 
     function drawSquares() {
       for (const sq of squares) {
-        // Motion trail for flying squares
+        const isHovered = (sq === hoveredSquare);
+        const isDimmedReplay = sq.isPastReplay && sq.state !== 'INSIDE';
+
+        // Motion trail (dashed & dimmer for past attempt replays)
         if (sq.trail.length > 1) {
           ctx.save();
+          if (isDimmedReplay) ctx.setLineDash([3, 4]);
           ctx.beginPath();
           for (let i = 0; i < sq.trail.length; i++) {
             const pt = sq.trail[i];
@@ -1065,13 +1125,12 @@
             else ctx.lineTo(pt.x, pt.y);
           }
           ctx.strokeStyle = sq.color;
-          ctx.globalAlpha = 0.35;
-          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = isDimmedReplay ? 0.22 : 0.4;
+          ctx.lineWidth = 1.4;
           ctx.stroke();
           ctx.restore();
         }
 
-        // Lock-screen waiting tether to the HomeBase wall
         if (sq.state === 'WAITING_LOCK') {
           ctx.save();
           ctx.strokeStyle = 'rgba(255, 190, 11, 0.45)';
@@ -1091,24 +1150,40 @@
         ctx.rotate(sq.angle);
 
         const s = sq.size;
-        const isHovered = (sq === hoveredSquare);
 
-        if (sq.state === 'WAITING_LOCK' || sq.state === 'FLYING_IN' || sq.pulse > 0 || isHovered) {
+        if (!isDimmedReplay && (sq.state === 'WAITING_LOCK' || sq.state === 'FLYING_IN' || sq.pulse > 0 || isHovered)) {
           ctx.shadowColor = sq.color;
           ctx.shadowBlur = isHovered ? 16 : 10;
         }
 
         ctx.strokeStyle = isHovered ? '#ffffff' : sq.color;
-        ctx.lineWidth = isHovered ? 2 : 1.4;
+        ctx.lineWidth = isHovered ? 2 : 1.3;
         ctx.fillStyle = sq.isClaimed ? sq.color : 'rgba(136, 146, 176, 0.18)';
-        ctx.globalAlpha = sq.isClaimed ? 0.88 : 0.45;
+
+        // Dimmer opacity for past failed attempts so live events stand out immediately
+        if (isDimmedReplay && !isHovered) {
+          ctx.globalAlpha = (sq.state === 'FLYING_IN' || sq.state === 'REJECTED_OUT') ? 0.46 : 0.28;
+        } else {
+          ctx.globalAlpha = sq.isClaimed ? 0.88 : 0.42;
+        }
 
         ctx.fillRect(-s / 2, -s / 2, s, s);
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = isDimmedReplay && !isHovered ? 0.52 : 1.0;
         ctx.strokeRect(-s / 2, -s / 2, s, s);
         ctx.restore();
 
-        // Hover lock reticle
+        // Floating Date/Time Stamp directly on flying past failed attempts
+        if (isDimmedReplay && (sq.state === 'FLYING_IN' || sq.state === 'REJECTED_OUT') && sq.replayStamp) {
+          ctx.save();
+          ctx.font = '500 9.5px "JetBrains Mono", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = 'rgba(215, 110, 125, 0.62)';
+          ctx.fillText(sq.replayStamp, sq.x, sq.y - sq.size - 7);
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.34)';
+          ctx.fillText(sq.ip, sq.x, sq.y + sq.size + 12);
+          ctx.restore();
+        }
+
         if (isHovered) {
           ctx.save();
           ctx.strokeStyle = '#ffffff';
@@ -1119,7 +1194,6 @@
         }
       }
 
-      // Collision / entry sparks
       for (const p of particles) {
         ctx.save();
         ctx.fillStyle = p.color;
