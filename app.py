@@ -894,7 +894,7 @@ with open("output.json", "w", encoding="utf-8") as f:
 """
 
 def select_compute_target(requested_target):
-    if requested_target in ("local", "1", "2", "3"):
+    if requested_target == "local" or requested_target in SERVERS:
         return requested_target
     if requested_target == "auto":
         return min(node_active_counts, key=node_active_counts.get)
