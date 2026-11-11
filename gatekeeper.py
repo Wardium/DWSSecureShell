@@ -1,12 +1,12 @@
 from flask import Flask, request, render_template, redirect, url_for, make_response, jsonify
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import logging
 import sys
 import uuid
-import socket
 import subprocess
+import socket
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from datetime import datetime, timedelta
 
@@ -18,8 +18,10 @@ ALLOWED_ORIGINS = [
     "https://auth.teamexist.com"
 ]
 
+# Servers to ping when /api/offlinestatus is called
+# Supports plain IPs ("192.168.2.111"), TCP ("192.168.2.91:5000"), or URLs ("http://...")
 MONITORED_SERVERS = [
-    "192.168.2.143",
+    "192.168.2.111",
     "192.168.2.91",
     "192.168.2.134"
 ]
@@ -51,6 +53,34 @@ TRUSTED_IPS = [
 ]
 
 FAILED_EVENT_TYPES = {"REJECT", "LOGIN_FAIL", "VERIFY_FAIL", "ADMIN_BAN"}
+
+# --- HELPER FUNCTIONS FOR SERVER PINGING ---
+def is_server_online(target):
+    """Pings an IP, TCP IP:Port, or HTTP URL. Returns True if online, False if down."""
+    target = target.strip()
+    try:
+        if target.startswith(('http://', 'https://')):
+            resp = requests.get(target, timeout=1.5)
+            return resp.status_code < 500
+
+        if ':' in target:
+            host, port = target.rsplit(':', 1)
+            with socket.create_connection((host, int(port)), timeout=1.5):
+                return True
+
+        param = '-n' if os.name == 'nt' else '-c'
+        wait_flag = '-w' if os.name == 'nt' else '-W'
+        wait_val = '1000' if os.name == 'nt' else '1'
+
+        res = subprocess.run(
+            ['ping', param, '1', wait_flag, wait_val, target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 # --- HELPER FUNCTIONS FOR GEOLOCATION ---
 def get_ip_location(ip, data=None):
@@ -313,6 +343,49 @@ def watch_homebase():
     """Zero-options real-time HomeBase visualizer."""
     return render_template('watch.html')
 
+@app.route('/api/offlinestatus', methods=['GET', 'OPTIONS'])
+def api_offline_status():
+    """Pings all MONITORED_SERVERS in parallel and returns how many are offline."""
+    origin = request.headers.get('Origin')
+
+    if request.method == 'OPTIONS':
+        response = make_response()
+        if origin in ALLOWED_ORIGINS:
+            response.headers.add("Access-Control-Allow-Origin", origin)
+            response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+            response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
+
+    if origin and origin not in ALLOWED_ORIGINS:
+        return jsonify({"error": "Origin not allowed"}), 403
+
+    if not MONITORED_SERVERS:
+        results = []
+    else:
+        with ThreadPoolExecutor(max_workers=len(MONITORED_SERVERS)) as executor:
+            results = list(executor.map(is_server_online, MONITORED_SERVERS))
+
+    offline_servers = [srv for srv, online in zip(MONITORED_SERVERS, results) if not online]
+    offline_count = len(offline_servers)
+
+    if request.args.get('raw') == '1':
+        response = make_response(str(offline_count), 200)
+        response.mimetype = "text/plain"
+    else:
+        response = jsonify({
+            "offline": offline_count,
+            "total": len(MONITORED_SERVERS),
+            "online": len(MONITORED_SERVERS) - offline_count,
+            "offline_servers": offline_servers
+        })
+
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+
+    return response
+
 @app.route('/api/telemetry', methods=['GET', 'OPTIONS'])
 def api_telemetry():
     """Real-time data feed for the /watch visualizer."""
@@ -350,81 +423,6 @@ def api_telemetry():
         response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
-def is_server_online(target):
-    """Pings an IP, TCP IP:Port, or HTTP URL. Returns True if online, False if down."""
-    target = target.strip()
-    try:
-        # 1. HTTP/HTTPS endpoint check
-        if target.startswith(('http://', 'https://')):
-            resp = requests.get(target, timeout=1.5)
-            return resp.status_code < 500
-
-        # 2. TCP IP:Port socket check (e.g., "192.168.2.91:5000")
-        if ':' in target:
-            host, port = target.rsplit(':', 1)
-            with socket.create_connection((host, int(port)), timeout=1.5):
-                return True
-
-        # 3. Standard ICMP Ping (Windows uses -n 1 -w 1000, Linux uses -c 1 -W 1)
-        param = '-n' if os.name == 'nt' else '-c'
-        wait_flag = '-w' if os.name == 'nt' else '-W'
-        wait_val = '1000' if os.name == 'nt' else '1'
-
-        res = subprocess.run(
-            ['ping', param, '1', wait_flag, wait_val, target],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2
-        )
-        return res.returncode == 0
-    except Exception:
-        return False
-
-@app.route('/api/offlinestatus', methods=['GET', 'OPTIONS'])
-def api_offline_status():
-    """Pings all MONITORED_SERVERS in parallel and returns how many are offline."""
-    origin = request.headers.get('Origin')
-
-    if request.method == 'OPTIONS':
-        response = make_response()
-        if origin in ALLOWED_ORIGINS:
-            response.headers.add("Access-Control-Allow-Origin", origin)
-            response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
-            response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-            response.headers.add("Access-Control-Allow-Credentials", "true")
-        return response
-
-    # Block unauthorized cross-origin requests if an Origin header is present
-    if origin and origin not in ALLOWED_ORIGINS:
-        return jsonify({"error": "Origin not allowed"}), 403
-
-    if not MONITORED_SERVERS:
-        results = []
-    else:
-        with ThreadPoolExecutor(max_workers=len(MONITORED_SERVERS)) as executor:
-            results = list(executor.map(is_server_online, MONITORED_SERVERS))
-
-    offline_servers = [srv for srv, online in zip(MONITORED_SERVERS, results) if not online]
-    offline_count = len(offline_servers)
-
-    # Choosing ?raw=1 returns just the plain number (e.g., 0, 1, 2)
-    if request.args.get('raw') == '1':
-        response = make_response(str(offline_count), 200)
-        response.mimetype = "text/plain"
-    else:
-        response = jsonify({
-            "offline": offline_count,
-            "total": len(MONITORED_SERVERS),
-            "online": len(MONITORED_SERVERS) - offline_count,
-            "offline_servers": offline_servers
-        })
-
-    if origin in ALLOWED_ORIGINS:
-        response.headers.add("Access-Control-Allow-Origin", origin)
-        response.headers.add("Access-Control-Allow-Credentials", "true")
-
-    return response
-
 @app.route('/api/login_leave', methods=['POST'])
 def api_login_leave():
     ip = get_client_ip()
@@ -449,7 +447,7 @@ def auth():
     ip = get_client_ip()
     target_url = request.headers.get('X-Original-URI', 'Unknown URL')
 
-    if any(target_url.startswith(p) for p in ('/watch', '/homebase', '/api/telemetry', '/api/login_leave')):
+    if any(target_url.startswith(p) for p in ('/watch', '/homebase', '/api/telemetry', '/api/login_leave', '/api/offlinestatus')):
         return "OK", 200
 
     data = load_data()
