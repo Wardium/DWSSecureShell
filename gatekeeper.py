@@ -22,9 +22,9 @@ ALLOWED_ORIGINS = [
 # Servers to ping when /api/offlinestatus is called
 # Supports plain IPs ("192.168.2.111"), TCP ("192.168.2.91:5000"), or URLs ("http://...")
 MONITORED_SERVERS = [
-    "192.168.2.111",
-    "192.168.2.91",
-    "192.168.2.134"
+    "192.168.2.111:22",
+    "192.168.2.91:22",
+    "192.168.2.134:22"
 ]
 
 # --- LOGGING SETUP ---
