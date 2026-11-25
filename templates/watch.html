@@ -163,13 +163,13 @@
 
   <div class="hud-top-left">
     <div id="connDot" class="pulse-dot"></div>
-    <span id="connText">AUTH.TEAMEXIST.COM // LIVE + ARCHIVE REPLAY</span>
+    <span id="connText">AUTH.TEAMEXIST.COM // LIVE + 4D STORM</span>
   </div>
 
   <div class="hud-top-right">
     <div class="stat-item">INSIDE<span id="statInside">0</span></div>
     <div class="stat-item">LOCK SCREEN<span id="statWaiting">0</span></div>
-    <div class="stat-item">PAST FAILED<span id="statPastFailed">0</span></div>
+    <div class="stat-item">FAILED (4D)<span id="statPastFailed">0</span></div>
     <div class="stat-item">BANNED<span id="statBanned">0</span></div>
   </div>
 
@@ -200,7 +200,7 @@
     const hb = {
       x: W / 2,
       y: H / 2,
-      size: 240,
+      size: 220,
       shakeX: 0,
       shakeY: 0,
       shakeVX: 0,
@@ -220,20 +220,30 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       hb.x = W / 2;
       hb.y = H / 2;
-      hb.size = Math.max(200, Math.min(280, Math.min(W, H) * 0.28));
+      hb.size = Math.max(180, Math.min(250, Math.min(W, H) * 0.25));
     }
     window.addEventListener('resize', resize);
     resize();
 
-    function getCornerAnchor(cornerIdx) {
-      const padX = Math.max(130, W * 0.14);
-      const padY = Math.max(120, H * 0.16);
-      switch (cornerIdx % 4) {
-        case 0: return { x: padX, y: padY };
-        case 1: return { x: W - padX, y: padY };
-        case 2: return { x: W - padX, y: H - padY };
-        case 3: return { x: padX, y: H - padY };
-      }
+    // Tornado geometry around HomeBase
+    function getVortexBands() {
+      const innerR = hb.size * 0.72 + 44;
+      const outerRx = Math.max(innerR + 100, W * 0.45);
+      const outerRy = Math.max(innerR + 75, H * 0.44);
+      return { innerR, outerRx, outerRy };
+    }
+
+    function getStormPosition(sq, t) {
+      const { innerR, outerRx, outerRy } = getVortexBands();
+      const wobble = Math.sin(t * sq.wobbleFreq + sq.wobblePhase) * sq.wobbleAmp;
+      const rx = innerR + sq.orbitNorm * (outerRx - innerR) + wobble;
+      const ry = innerR + sq.orbitNorm * (outerRy - innerR) + wobble * 0.85;
+      return {
+        x: hb.x + Math.cos(sq.orbitAngle) * rx,
+        y: hb.y + Math.sin(sq.orbitAngle) * ry,
+        rx,
+        ry
+      };
     }
 
     const squares = [];
@@ -241,49 +251,95 @@
     const particles = [];
     const shockwaves = [];
 
-    // Queue of real historical failed attempts to cycle through
-    const pastFailedQueue = [];
-    const pastFailedSeenKeys = new Set();
+    // Subtle rotating tornado wind arcs
+    const vortexRings = [
+      { norm: 0.08, angle: 0.2, speed: -0.0085, dash: [22, 38], alpha: 0.055 },
+      { norm: 0.36, angle: 2.1, speed: -0.0055, dash: [34, 54], alpha: 0.042 },
+      { norm: 0.68, angle: 4.0, speed: -0.0036, dash: [42, 72], alpha: 0.032 },
+      { norm: 0.94, angle: 1.1, speed: -0.0024, dash: [28, 90], alpha: 0.025 }
+    ];
+
+    // Queue of real historical failed attempts (within 4-day retention window)
+    let pastFailedQueue = [];
     let replayCursor = 0;
 
-    // 36 ambient corner-cloud squares
-    const AMBIENT_COUNT = 36;
-    for (let i = 0; i < AMBIENT_COUNT; i++) {
-      const corner = i % 4;
-      const anchor = getCornerAnchor(corner);
-      const angle = (i / (AMBIENT_COUNT / 4)) * Math.PI * 2 + Math.random() * 0.5;
-      const radius = 28 + Math.random() * 68;
-      squares.push({
-        id: `ambient_${i}`,
+    const MIN_AMBIENT_SQUARES = 22;
+    const MAX_STORM_REAL = 95;
+    let frameTick = 0;
+
+    function createSquareObj(overrides = {}) {
+      const orbitNorm = Math.pow(Math.random(), 0.82); // Slightly denser toward inner storm bands
+      const orbitAngle = Math.random() * Math.PI * 2;
+      // Inner bands whip faster than outer bands (cyclone profile, counter-clockwise)
+      const baseOmega = (0.0145 - orbitNorm * 0.0088) * (0.88 + Math.random() * 0.24);
+      const sq = {
+        id: `sq_${Date.now()}_${Math.random()}`,
         key: null,
         isClaimed: false,
         isPastReplay: false,
         replayStamp: '',
-        state: 'CLOUD',
-        corner,
-        orbitRadius: radius,
-        orbitAngle: angle,
-        orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * (0.004 + Math.random() * 0.006),
-        x: anchor.x + Math.cos(angle) * radius,
-        y: anchor.y + Math.sin(angle) * radius,
-        vx: (Math.random() - 0.5) * 0.8,
-        vy: (Math.random() - 0.5) * 0.8,
-        size: 11,
+        state: 'STORM',
+        orbitNorm,
+        orbitAngle,
+        orbitSpeed: -baseOmega,
+        wobbleAmp: 6 + Math.random() * 14,
+        wobbleFreq: 0.012 + Math.random() * 0.018,
+        wobblePhase: Math.random() * Math.PI * 2,
+        x: hb.x,
+        y: hb.y,
+        vx: 0,
+        vy: 0,
+        size: 9 + Math.random() * 3,
         angle: Math.random() * Math.PI * 2,
-        vAngle: (Math.random() - 0.5) * 0.06,
-        color: '#8892b0',
+        vAngle: -(0.025 + (1 - orbitNorm) * 0.045),
+        color: '#475569',
         trail: [],
         pulse: 0,
-        ip: 'Unassigned Node',
-        badge: 'CLOUD IDLE',
-        badgeColor: '#64748b',
-        location: 'Outer Perimeter Cloud',
+        ip: 'Ambient Node',
+        badge: 'STORM DEBRIS',
+        badgeColor: '#475569',
+        location: 'Outer Vortex',
         route: 'Awaiting Traffic',
-        detail: 'Orbiting corner cloud',
+        detail: 'Circling HomeBase perimeter',
         device: '--',
         time: '--',
-        sessionId: ''
-      });
+        sessionId: '',
+        ...overrides
+      };
+      if (sq.state === 'STORM') {
+        const pos = getStormPosition(sq, frameTick);
+        sq.x = pos.x;
+        sq.y = pos.y;
+      }
+      return sq;
+    }
+
+    function ensureAmbientFloor() {
+      const ambientCount = squares.filter(s => !s.isClaimed).length;
+      const realStormCount = squares.filter(s => s.isClaimed && s.state !== 'INSIDE').length;
+      const desiredAmbient = Math.max(8, MIN_AMBIENT_SQUARES - Math.floor(realStormCount * 0.5));
+
+      if (ambientCount < desiredAmbient) {
+        for (let i = 0; i < desiredAmbient - ambientCount; i++) {
+          squares.push(createSquareObj());
+        }
+      } else if (ambientCount > desiredAmbient + 6) {
+        let toRemove = ambientCount - desiredAmbient;
+        for (let i = squares.length - 1; i >= 0 && toRemove > 0; i--) {
+          if (!squares[i].isClaimed && squares[i].state === 'STORM') {
+            squares.splice(i, 1);
+            toRemove--;
+          }
+        }
+      }
+    }
+    ensureAmbientFloor();
+
+    function releaseSquare(sq) {
+      if (sq.key && entityByKey.get(sq.key) === sq) entityByKey.delete(sq.key);
+      if (sq.ip && entityByKey.get(sq.ip) === sq) entityByKey.delete(sq.ip);
+      const idx = squares.indexOf(sq);
+      if (idx !== -1) squares.splice(idx, 1);
     }
 
     function claimOrGetSquare(key, ip, preferInside = false) {
@@ -295,67 +351,43 @@
         return sq;
       }
 
-      let candidate = squares.find(s => !s.isClaimed && s.state === 'CLOUD');
+      // Recycle an unclaimed ambient square first if available
+      let candidate = squares.find(s => !s.isClaimed && s.state === 'STORM');
       if (!candidate) {
-        const corner = squares.length % 4;
-        const anchor = getCornerAnchor(corner);
-        candidate = {
-          id: `real_${Date.now()}_${Math.random()}`,
-          key,
-          isClaimed: true,
-          isPastReplay: false,
-          replayStamp: '',
-          state: preferInside ? 'INSIDE' : 'CLOUD',
-          corner,
-          orbitRadius: 35 + Math.random() * 60,
-          orbitAngle: Math.random() * Math.PI * 2,
-          orbitSpeed: (Math.random() < 0.5 ? 1 : -1) * (0.006),
-          x: preferInside ? hb.x + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.x,
-          y: preferInside ? hb.y + (Math.random() - 0.5) * (hb.size * 0.6) : anchor.y,
-          vx: (Math.random() - 0.5) * 1.2,
-          vy: (Math.random() - 0.5) * 1.2,
-          size: 12,
-          angle: Math.random() * Math.PI * 2,
-          vAngle: (Math.random() - 0.5) * 0.07,
-          color: '#ffffff',
-          trail: [],
-          pulse: 0,
-          ip,
-          badge: 'KNOWN IP',
-          badgeColor: '#94a3b8',
-          location: 'Unknown Location',
-          route: '--',
-          detail: '--',
-          device: '--',
-          time: '--',
-          sessionId: ''
-        };
-        squares.push(candidate);
-      } else {
-        candidate.isClaimed = true;
-        candidate.key = key;
-        candidate.ip = ip;
-        if (preferInside) {
-          candidate.state = 'INSIDE';
-          candidate.x = hb.x + (Math.random() - 0.5) * (hb.size * 0.65);
-          candidate.y = hb.y + (Math.random() - 0.5) * (hb.size * 0.65);
-          candidate.vx = (Math.random() - 0.5) * 1.1;
-          candidate.vy = (Math.random() - 0.5) * 1.1;
+        // Respect storm density cap by recycling the oldest idle non-active storm square if full
+        const realStorm = squares.filter(s => s.isClaimed && s.state === 'STORM');
+        if (!preferInside && realStorm.length >= MAX_STORM_REAL) {
+          candidate = realStorm[0];
+          if (candidate.key && entityByKey.get(candidate.key) === candidate) entityByKey.delete(candidate.key);
+          if (candidate.ip && entityByKey.get(candidate.ip) === candidate) entityByKey.delete(candidate.ip);
+        } else {
+          candidate = createSquareObj({ size: 11.5 });
+          squares.push(candidate);
         }
+      }
+
+      candidate.isClaimed = true;
+      candidate.isPastReplay = false;
+      candidate.replayStamp = '';
+      candidate.key = key;
+      candidate.ip = ip;
+      candidate.size = 11.5;
+      candidate.color = '#94a3b8';
+      candidate.badge = 'KNOWN IP';
+      candidate.badgeColor = '#94a3b8';
+
+      if (preferInside) {
+        candidate.state = 'INSIDE';
+        candidate.x = hb.x + (Math.random() - 0.5) * (hb.size * 0.62);
+        candidate.y = hb.y + (Math.random() - 0.5) * (hb.size * 0.62);
+        candidate.vx = (Math.random() - 0.5) * 1.2;
+        candidate.vy = (Math.random() - 0.5) * 1.2;
+        candidate.trail.length = 0;
       }
 
       entityByKey.set(key, candidate);
       entityByKey.set(ip, candidate);
       return candidate;
-    }
-
-    function addFailedEventToReplayQueue(ev) {
-      if (!ev || !['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) return;
-      const sig = `${ev.id || 0}_${ev.ip}_${ev.time}_${ev.route}`;
-      if (pastFailedSeenKeys.has(sig)) return;
-      pastFailedSeenKeys.add(sig);
-      pastFailedQueue.push(ev);
-      document.getElementById('statPastFailed').textContent = pastFailedQueue.length;
     }
 
     function getHomeBaseEdgeTarget(sq) {
@@ -411,13 +443,12 @@
     }
 
     function triggerRedReject(sq, isPastReplay = false) {
-      const angle = Math.atan2(hb.y - sq.y, hb.x - sq.x);
+      const impactAngle = Math.atan2(hb.y - sq.y, hb.x - sq.x);
 
       if (isPastReplay) {
-        // Dimmer, softer red pulse & micro-shake for past attempt replays
         hb.redGlow = Math.max(hb.redGlow, 0.38);
-        hb.shakeVX += Math.cos(angle) * 5.5 + (Math.random() - 0.5) * 3.5;
-        hb.shakeVY += Math.sin(angle) * 5.5 + (Math.random() - 0.5) * 3.5;
+        hb.shakeVX += Math.cos(impactAngle) * 5.0 + (Math.random() - 0.5) * 3.0;
+        hb.shakeVY += Math.sin(impactAngle) * 5.0 + (Math.random() - 0.5) * 3.0;
 
         shockwaves.push({
           x: hb.x,
@@ -430,12 +461,11 @@
 
         sq.state = 'REJECTED_OUT';
         sq.color = '#9e2a3b';
-        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.16;
+        sq.vAngle = -0.18;
       } else {
-        // Full-force neon red flash & shake for LIVE failed attempts
         hb.redGlow = 1.0;
-        hb.shakeVX += Math.cos(angle) * 15 + (Math.random() - 0.5) * 10;
-        hb.shakeVY += Math.sin(angle) * 15 + (Math.random() - 0.5) * 10;
+        hb.shakeVX += Math.cos(impactAngle) * 14 + (Math.random() - 0.5) * 9;
+        hb.shakeVY += Math.sin(impactAngle) * 14 + (Math.random() - 0.5) * 9;
 
         shockwaves.push({
           x: hb.x,
@@ -448,14 +478,18 @@
 
         sq.state = 'REJECTED_OUT';
         sq.color = '#ff2244';
-        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.28;
+        sq.vAngle = -0.3;
       }
 
-      const anchor = getCornerAnchor(sq.corner);
-      const backAngle = Math.atan2(anchor.y - sq.y, anchor.x - sq.x);
-      const recoilSpd = isPastReplay ? 5.5 : 8.5;
-      sq.vx = Math.cos(backAngle) * recoilSpd;
-      sq.vy = Math.sin(backAngle) * recoilSpd;
+      // Launch outward from HomeBase with tangential swirl kick so it hooks back into the tornado
+      const outAngle = Math.atan2(sq.y - hb.y, sq.x - hb.x);
+      const tangAngle = outAngle - Math.PI / 2; // Counter-clockwise swirl direction
+      const radialSpd = isPastReplay ? 5.2 : 8.2;
+      const tangSpd = isPastReplay ? 3.2 : 4.5;
+
+      sq.orbitAngle = outAngle - 0.35;
+      sq.vx = Math.cos(outAngle) * radialSpd + Math.cos(tangAngle) * tangSpd;
+      sq.vy = Math.sin(outAngle) * radialSpd + Math.sin(tangAngle) * tangSpd;
     }
 
     const feedEl = document.getElementById('eventFeed');
@@ -477,14 +511,8 @@
       }
     }
 
-    // Trigger a live event from gatekeeper.py
     function handleLiveEvent(ev) {
       pushFeedLine(ev, false);
-
-      // Archive any new failed event into the replay cycle as well
-      if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL', 'ADMIN_BAN'].includes(ev.type)) {
-        addFailedEventToReplayQueue(ev);
-      }
 
       const key = ev.session_id || ev.ip;
       const sq = claimOrGetSquare(key, ev.ip, false);
@@ -526,9 +554,12 @@
       if (ev.type === 'LOCK_ABANDON') {
         sq.badge = 'LEFT LOCK SCREEN';
         sq.badgeColor = '#94a3b8';
-        sq.state = 'REJECTED_OUT';
         sq.color = '#94a3b8';
-        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.14;
+        const outAngle = Math.atan2(sq.y - hb.y, sq.x - hb.x);
+        sq.orbitAngle = outAngle;
+        sq.vx = Math.cos(outAngle) * 5;
+        sq.vy = Math.sin(outAngle) * 5;
+        sq.state = 'REJECTED_OUT';
         return;
       }
 
@@ -536,8 +567,11 @@
         sq.badge = ev.type === 'ADMIN_BAN' ? 'BANNED IP' : 'DISCONNECTED';
         sq.badgeColor = ev.type === 'ADMIN_BAN' ? '#ff2244' : '#94a3b8';
         sq.color = ev.type === 'ADMIN_BAN' ? '#ff2244' : '#94a3b8';
+        const outAngle = Math.atan2(sq.y - hb.y, sq.x - hb.x);
+        sq.orbitAngle = outAngle;
+        sq.vx = Math.cos(outAngle) * 6;
+        sq.vy = Math.sin(outAngle) * 6;
         sq.state = 'REJECTED_OUT';
-        sq.vAngle = (Math.random() < 0.5 ? 1 : -1) * 0.2;
         if (ev.type === 'ADMIN_BAN') {
           hb.redGlow = 0.8;
           spawnSparks(sq.x, sq.y, '#ff2244', 16, 1.0);
@@ -545,7 +579,6 @@
         return;
       }
 
-      // Live Authorized Pass (NEVER replayed from history, strictly live)
       if (['LOGIN_SUCCESS', 'AUTH_OK', 'VERIFY_OK', 'ADMIN_ALLOW'].includes(ev.type)) {
         const edge = getHomeBaseEdgeTarget(sq);
         sq.targetX = edge.x;
@@ -566,7 +599,6 @@
         return;
       }
 
-      // Live Rejected Attempt
       if (['REJECT', 'LOGIN_FAIL', 'VERIFY_FAIL'].includes(ev.type)) {
         const edge = getHomeBaseEdgeTarget(sq);
         sq.targetX = edge.x;
@@ -586,42 +618,54 @@
       }
     }
 
-    // Cycle Past Failed Attempts with Dimmer Color & Timestamp
+    // Periodically peel a past failed IP out of the tornado to jump at HomeBase
     function triggerNextPastFailedReplay() {
       if (pastFailedQueue.length === 0) return;
 
-      const ev = pastFailedQueue[replayCursor % pastFailedQueue.length];
-      replayCursor = (replayCursor + 1) % pastFailedQueue.length;
+      // Keep at most 2 replay lunges in flight at once so the storm stays legible
+      const activeReplays = squares.filter(s => s.isPastReplay && (s.state === 'FLYING_IN' || s.state === 'REJECTED_OUT')).length;
+      if (activeReplays >= 2) return;
 
-      const sq = claimOrGetSquare(ev.ip, ev.ip, false);
-      // Do not interrupt a square if that IP is currently inside, waiting at lock screen, or mid-live-flight
-      if (sq.state !== 'CLOUD') return;
+      // Try up to 5 items to find one currently swirling in the storm
+      for (let tries = 0; tries < Math.min(5, pastFailedQueue.length); tries++) {
+        const ev = pastFailedQueue[replayCursor % pastFailedQueue.length];
+        replayCursor = (replayCursor + 1) % pastFailedQueue.length;
 
-      sq.isPastReplay = true;
-      sq.replayStamp = ev.time || 'PAST ATTEMPT';
-      sq.ip = ev.ip;
-      sq.location = ev.location || sq.location;
-      sq.route = ev.route || '/auth';
-      sq.detail = ev.detail || 'Past failed attempt';
-      sq.device = ev.device_info || sq.device;
-      sq.time = ev.time || '--';
-      sq.badge = `PAST ${ev.type} (REPLAY)`;
-      sq.badgeColor = '#b84a59';
-      sq.color = '#9e2a3b';
+        const sq = claimOrGetSquare(ev.ip, ev.ip, false);
+        if (sq.state !== 'STORM') continue;
 
-      const edge = getHomeBaseEdgeTarget(sq);
-      sq.targetX = edge.x;
-      sq.targetY = edge.y;
-      sq.targetSide = edge.side;
-      sq.targetGatePos = edge.gatePos;
-      sq.afterFlight = 'REJECT_OUT';
-      sq.state = 'FLYING_IN';
+        sq.isPastReplay = true;
+        sq.replayStamp = ev.time || 'PAST ATTEMPT';
+        sq.ip = ev.ip;
+        sq.location = ev.location || sq.location;
+        sq.route = ev.route || '/auth';
+        sq.detail = ev.detail || 'Past failed attempt';
+        sq.device = ev.device_info || sq.device;
+        sq.time = ev.time || '--';
+        sq.badge = `PAST ${ev.type} (REPLAY)`;
+        sq.badgeColor = '#b84a59';
+        sq.color = '#b83348';
 
-      pushFeedLine(ev, true);
+        const edge = getHomeBaseEdgeTarget(sq);
+        sq.targetX = edge.x;
+        sq.targetY = edge.y;
+        sq.targetSide = edge.side;
+        sq.targetGatePos = edge.gatePos;
+        sq.afterFlight = 'REJECT_OUT';
+        sq.state = 'FLYING_IN';
+
+        pushFeedLine(ev, true);
+        break;
+      }
     }
 
-    // Continuously cycle past failed attempts every 3.2 seconds
-    setInterval(triggerNextPastFailedReplay, 3200);
+    function scheduleNextReplay() {
+      const delay = 2200 + Math.random() * 1900;
+      setTimeout(() => {
+        triggerNextPastFailedReplay();
+        scheduleNextReplay();
+      }, delay);
+    }
 
     let lastEventId = 0;
     let firstSync = true;
@@ -633,6 +677,8 @@
         const data = await res.json();
 
         document.getElementById('connDot').classList.remove('offline');
+        const retentionDays = data.retention_days || 4;
+        document.getElementById('connText').textContent = `AUTH.TEAMEXIST.COM // LIVE + ${retentionDays}D STORM`;
 
         const activeSessions = data.active_sessions || {};
         const allowedIps = data.allowed_ips || {};
@@ -647,13 +693,56 @@
         document.getElementById('statWaiting').textContent = Object.keys(pendingLogins).length;
         document.getElementById('statBanned').textContent = Object.keys(bannedIps).length;
 
-        // Sync historical failed attempts into the replay cycle
-        for (const fEv of failedHistory) {
-          addFailedEventToReplayQueue(fEv);
+        // Replace replay queue with server's pruned 4-day failed_history
+        pastFailedQueue = failedHistory.slice();
+        if (pastFailedQueue.length > 0) {
+          replayCursor = replayCursor % pastFailedQueue.length;
+        } else {
+          replayCursor = 0;
+        }
+        document.getElementById('statPastFailed').textContent = pastFailedQueue.length;
+
+        // Build set of valid IPs/keys within the 4-day window
+        const validKeys = new Set([
+          ...Object.keys(activeSessions),
+          ...Object.keys(allowedIps).map(ip => `allow_${ip}`),
+          ...Object.keys(allowedIps),
+          ...Object.keys(pendingLogins),
+          ...Object.keys(attempts),
+          ...Object.keys(knownIps),
+          ...failedHistory.map(ev => ev.ip)
+        ]);
+        for (const sess of Object.values(activeSessions)) {
+          if (sess && sess.ip) validKeys.add(sess.ip);
         }
 
+        // Evict storm squares whose data aged past the 4-day window on the server
+        for (let i = squares.length - 1; i >= 0; i--) {
+          const sq = squares[i];
+          if (!sq.isClaimed) continue;
+
+          if (sq.state === 'INSIDE') {
+            const stillActive = (sq.sessionId && activeSessions[sq.sessionId]) ||
+                                (sq.key && activeSessions[sq.key]) ||
+                                allowedIps[sq.ip];
+            if (!stillActive) {
+              const outAngle = Math.atan2(sq.y - hb.y, sq.x - hb.x);
+              sq.orbitAngle = outAngle;
+              sq.vx = Math.cos(outAngle) * 4.5;
+              sq.vy = Math.sin(outAngle) * 4.5;
+              sq.color = '#64748b';
+              sq.badge = 'SESSION ENDED';
+              sq.badgeColor = '#64748b';
+              sq.state = 'REJECTED_OUT';
+            }
+          } else if (sq.state === 'STORM' && !validKeys.has(sq.ip) && !validKeys.has(sq.key)) {
+            releaseSquare(sq);
+          }
+        }
+
+        const failedIpSet = new Set(failedHistory.map(ev => ev.ip));
+
         if (firstSync) {
-          // Place currently active real sessions inside HomeBase
           for (const [sessId, info] of Object.entries(activeSessions)) {
             const sq = claimOrGetSquare(sessId, info.ip || 'Session', true);
             sq.isPastReplay = false;
@@ -700,25 +789,56 @@
             sq.detail = 'Waiting for password input';
           }
 
-          for (const [ip, info] of Object.entries(knownIps)) {
+          // Populate recent 4-day visitors into the swirling storm (most recent first, capped cleanly)
+          const recentKnown = Object.entries(knownIps)
+            .sort((a, b) => (b[1].last_seen || '').localeCompare(a[1].last_seen || ''))
+            .slice(0, MAX_STORM_REAL);
+
+          for (const [ip, info] of recentKnown) {
             if (!entityByKey.has(ip)) {
               const sq = claimOrGetSquare(ip, ip, false);
               sq.location = info.location || 'Unknown';
               sq.device = info.device_info || '--';
               sq.route = info.last_route || '--';
               sq.time = info.last_seen || '--';
-              sq.badge = 'PAST VISITOR';
-              sq.badgeColor = '#64748b';
+              if (failedIpSet.has(ip)) {
+                sq.color = '#9e2a3b';
+                sq.isPastReplay = true;
+                sq.replayStamp = info.last_seen || '';
+                sq.badge = 'PAST FAILED (4D)';
+                sq.badgeColor = '#b84a59';
+              } else {
+                sq.color = '#64748b';
+                sq.badge = 'RECENT VISITOR';
+                sq.badgeColor = '#64748b';
+              }
+            }
+          }
+
+          // Seed any failed_history IPs not yet in known_ips
+          for (const ev of failedHistory.slice(-MAX_STORM_REAL)) {
+            if (!entityByKey.has(ev.ip)) {
+              const sq = claimOrGetSquare(ev.ip, ev.ip, false);
+              sq.color = '#9e2a3b';
+              sq.isPastReplay = true;
+              sq.replayStamp = ev.time || '';
+              sq.location = ev.location || 'Unknown';
+              sq.device = ev.device_info || '--';
+              sq.route = ev.route || '/auth';
+              sq.detail = ev.detail || 'Past failed attempt';
+              sq.time = ev.time || '--';
+              sq.badge = `PAST ${ev.type}`;
+              sq.badgeColor = '#b84a59';
             }
           }
 
           for (const [ip, info] of Object.entries(attempts)) {
             const sq = claimOrGetSquare(ip, ip, false);
-            if (sq.state === 'CLOUD') {
+            if (sq.state === 'STORM') {
               sq.color = '#9e2a3b';
               sq.isPastReplay = true;
               sq.replayStamp = info.time || '';
-              sq.badge = `PAST ATTEMPTS (${info.count})`;
+              sq.badge = `RECENT ATTEMPTS (${info.count})`;
               sq.badgeColor = '#b84a59';
               sq.location = info.location || sq.location;
               sq.time = info.time || sq.time;
@@ -726,24 +846,14 @@
             }
           }
 
-          for (const [ip, info] of Object.entries(bannedIps)) {
-            const sq = claimOrGetSquare(ip, ip, false);
-            if (sq.state === 'CLOUD') {
-              sq.color = '#9e2a3b';
-              sq.isPastReplay = true;
-              sq.replayStamp = info.time || '';
-              sq.badge = 'BANNED IP';
-              sq.badgeColor = '#ff2244';
-              sq.time = info.time || '--';
-              sq.detail = 'Banned by Gatekeeper';
-            }
-          }
-
           lastEventId = data.last_event_id || 0;
           firstSync = false;
+          ensureAmbientFloor();
 
-          // Kick off the first historical failed attempt replay right away
-          setTimeout(triggerNextPastFailedReplay, 900);
+          setTimeout(() => {
+            triggerNextPastFailedReplay();
+            scheduleNextReplay();
+          }, 900);
         } else {
           const newEvents = data.events || [];
           for (const ev of newEvents) {
@@ -752,6 +862,7 @@
               handleLiveEvent(ev);
             }
           }
+          ensureAmbientFloor();
         }
       } catch (err) {
         document.getElementById('connDot').classList.add('offline');
@@ -774,14 +885,14 @@
       mouse.y = -9999;
     });
 
-    function resolveCollisions(group) {
+    function resolveInsideCollisions(group) {
       for (let i = 0; i < group.length; i++) {
         for (let j = i + 1; j < group.length; j++) {
           const a = group[i];
           const b = group[j];
           const dx = b.x - a.x;
           const dy = b.y - a.y;
-          const minDist = (a.size + b.size) * 0.78;
+          const minDist = (a.size + b.size) * 0.82;
           const distSq = dx * dx + dy * dy;
           if (distSq > 0 && distSq < minDist * minDist) {
             const dist = Math.sqrt(distSq);
@@ -801,17 +912,45 @@
               a.vy -= p * ny * 0.85;
               b.vx += p * nx * 0.85;
               b.vy += p * ny * 0.85;
-
-              const spinKick = (Math.random() - 0.5) * 0.09;
-              a.vAngle = Math.max(-0.22, Math.min(0.22, a.vAngle + spinKick));
-              b.vAngle = Math.max(-0.22, Math.min(0.22, b.vAngle - spinKick));
             }
           }
         }
       }
     }
 
+    // Soft local repulsion in the vortex so squares never clump into static blobs
+    function resolveStormSeparation(group) {
+      for (let i = 0; i < group.length; i++) {
+        const a = group[i];
+        if (a === hoveredSquare) continue;
+        for (let j = i + 1; j < group.length; j++) {
+          const b = group[j];
+          if (b === hoveredSquare) continue;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const minDist = (a.size + b.size) * 0.95;
+          const distSq = dx * dx + dy * dy;
+          if (distSq > 0.01 && distSq < minDist * minDist) {
+            const dist = Math.sqrt(distSq);
+            const push = (minDist - dist) * 0.06;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            a.x -= nx * push;
+            a.y -= ny * push;
+            b.x += nx * push;
+            b.y += ny * push;
+          }
+        }
+      }
+    }
+
     function updatePhysics() {
+      frameTick++;
+
+      for (const ring of vortexRings) {
+        ring.angle += ring.speed;
+      }
+
       const springK = 0.28;
       const damping = 0.72;
       hb.shakeVX = (hb.shakeVX - hb.shakeX * springK) * damping;
@@ -827,7 +966,7 @@
       const innerPad = 14;
 
       hoveredSquare = null;
-      let minHoverDist = 24;
+      let minHoverDist = 28;
 
       for (const sq of squares) {
         const dMouse = Math.hypot(mouse.x - sq.x, mouse.y - sq.y);
@@ -839,50 +978,42 @@
 
       for (const sq of squares) {
         const isHovered = (sq === hoveredSquare);
-        const speedScale = isHovered ? 0.15 : 1.0;
+        const speedScale = isHovered ? 0.06 : 1.0;
 
         sq.angle += sq.vAngle * speedScale;
-        if (Math.abs(sq.vAngle) > 0.06) {
-          sq.vAngle *= 0.985;
+        if (Math.abs(sq.vAngle) > 0.075) {
+          sq.vAngle *= 0.98;
         } else if (Math.abs(sq.vAngle) < 0.015) {
-          sq.vAngle += (sq.vAngle >= 0 ? 1 : -1) * 0.002;
+          sq.vAngle -= 0.002;
         }
 
         if (sq.pulse > 0) sq.pulse = Math.max(0, sq.pulse - 0.03);
 
-        if (sq.state === 'CLOUD') {
-          const anchor = getCornerAnchor(sq.corner);
+        if (sq.state === 'STORM') {
           sq.orbitAngle += sq.orbitSpeed * speedScale;
-          const desiredX = anchor.x + Math.cos(sq.orbitAngle) * sq.orbitRadius;
-          const desiredY = anchor.y + Math.sin(sq.orbitAngle) * sq.orbitRadius;
+          const target = getStormPosition(sq, frameTick);
 
-          sq.vx += (desiredX - sq.x) * 0.015;
-          sq.vy += (desiredY - sq.y) * 0.015;
-
-          const dxC = sq.x - hb.x;
-          const dyC = sq.y - hb.y;
-          const safeDist = hb.size * 0.85;
-          if (Math.abs(dxC) < safeDist && Math.abs(dyC) < safeDist) {
-            const pushAngle = Math.atan2(dyC, dxC);
-            sq.vx += Math.cos(pushAngle) * 0.6;
-            sq.vy += Math.sin(pushAngle) * 0.6;
-          }
-
-          sq.vx *= 0.92;
-          sq.vy *= 0.92;
+          // Smooth spring-follow onto swirling elliptical vortex track
+          sq.vx = (sq.vx + (target.x - sq.x) * 0.09) * 0.78;
+          sq.vy = (sq.vy + (target.y - sq.y) * 0.09) * 0.78;
           sq.x += sq.vx * speedScale;
           sq.y += sq.vy * speedScale;
-          sq.trail.length = 0;
+
+          if (!isHovered) {
+            sq.trail.push({ x: sq.x, y: sq.y });
+            const maxTrail = sq.isClaimed ? 6 : 4;
+            if (sq.trail.length > maxTrail) sq.trail.shift();
+          }
 
         } else if (sq.state === 'FLYING_IN') {
           sq.trail.push({ x: sq.x, y: sq.y });
-          if (sq.trail.length > 14) sq.trail.shift();
+          if (sq.trail.length > 16) sq.trail.shift();
 
           const dx = sq.targetX - sq.x;
           const dy = sq.targetY - sq.y;
           const dist = Math.hypot(dx, dy);
 
-          if (dist < 8) {
+          if (dist < 9) {
             sq.x = sq.targetX;
             sq.y = sq.targetY;
             sq.vx = 0;
@@ -897,13 +1028,16 @@
               triggerRedReject(sq, sq.isPastReplay);
             }
           } else {
-            const maxSpd = sq.isPastReplay ? 6.2 : 9.5;
-            const spd = Math.min(maxSpd, Math.max(2.6, dist * 0.11));
-            sq.vx = (dx / dist) * spd;
-            sq.vy = (dy / dist) * spd;
-            sq.x += sq.vx;
-            sq.y += sq.vy;
-            sq.vAngle = sq.isPastReplay ? 0.09 : 0.14;
+            // Smoothly steer out of tangential vortex momentum into HomeBase
+            const maxSpd = sq.isPastReplay ? 6.8 : 10.2;
+            const desiredSpd = Math.min(maxSpd, Math.max(3.0, dist * 0.12));
+            const desiredVX = (dx / dist) * desiredSpd;
+            const desiredVY = (dy / dist) * desiredSpd;
+            sq.vx += (desiredVX - sq.vx) * 0.22;
+            sq.vy += (desiredVY - sq.vy) * 0.22;
+            sq.x += sq.vx * speedScale;
+            sq.y += sq.vy * speedScale;
+            sq.vAngle = sq.isPastReplay ? -0.11 : -0.17;
           }
 
         } else if (sq.state === 'WAITING_LOCK') {
@@ -911,7 +1045,7 @@
           const edge = getHomeBaseEdgeTarget(sq);
           sq.x += (edge.x - sq.x) * 0.15;
           sq.y += (edge.y - sq.y) * 0.15;
-          sq.vAngle = 0.04;
+          sq.vAngle = -0.04;
 
         } else if (sq.state === 'ENTERING') {
           sq.trail.push({ x: sq.x, y: sq.y });
@@ -955,31 +1089,31 @@
 
         } else if (sq.state === 'REJECTED_OUT') {
           sq.trail.push({ x: sq.x, y: sq.y });
-          if (sq.trail.length > 14) sq.trail.shift();
+          if (sq.trail.length > 15) sq.trail.shift();
 
-          const anchor = getCornerAnchor(sq.corner);
-          const dx = anchor.x - sq.x;
-          const dy = anchor.y - sq.y;
+          // Keep advancing its tornado angle so it curves smoothly back into the moving stream
+          sq.orbitAngle += sq.orbitSpeed * 0.9;
+          const rejoin = getStormPosition(sq, frameTick);
+          const dx = rejoin.x - sq.x;
+          const dy = rejoin.y - sq.y;
           const dist = Math.hypot(dx, dy);
 
-          sq.vx += (dx / Math.max(1, dist)) * 0.45;
-          sq.vy += (dy / Math.max(1, dist)) * 0.45;
-          sq.vx *= 0.94;
-          sq.vy *= 0.94;
-          sq.x += sq.vx;
-          sq.y += sq.vy;
+          sq.vx += (dx / Math.max(1, dist)) * 0.52;
+          sq.vy += (dy / Math.max(1, dist)) * 0.52;
+          sq.vx *= 0.93;
+          sq.vy *= 0.93;
+          sq.x += sq.vx * speedScale;
+          sq.y += sq.vy * speedScale;
 
-          if (dist < 75) {
-            sq.state = 'CLOUD';
-            sq.trail.length = 0;
+          if (dist < 42) {
+            sq.state = 'STORM';
+            if (sq.isPastReplay) sq.color = '#9e2a3b';
           }
         }
       }
 
-      const insideGroup = squares.filter(s => s.state === 'INSIDE');
-      const cloudGroup = squares.filter(s => s.state === 'CLOUD');
-      resolveCollisions(insideGroup);
-      resolveCollisions(cloudGroup);
+      resolveInsideCollisions(squares.filter(s => s.state === 'INSIDE'));
+      resolveStormSeparation(squares.filter(s => s.state === 'STORM'));
 
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
@@ -1017,6 +1151,26 @@
       } else {
         tooltip.classList.remove('visible');
       }
+    }
+
+    function drawVortexBackdrop() {
+      const { innerR, outerRx, outerRy } = getVortexBands();
+      ctx.save();
+      for (const ring of vortexRings) {
+        const rx = innerR + ring.norm * (outerRx - innerR);
+        const ry = innerR + ring.norm * (outerRy - innerR);
+        ctx.save();
+        ctx.translate(hb.x, hb.y);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${ring.alpha})`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(ring.dash);
+        ctx.lineDashOffset = ring.angle * 160;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.restore();
     }
 
     function drawHomeBase() {
@@ -1113,11 +1267,12 @@
       for (const sq of squares) {
         const isHovered = (sq === hoveredSquare);
         const isDimmedReplay = sq.isPastReplay && sq.state !== 'INSIDE';
+        const isAmbient = !sq.isClaimed;
 
-        // Motion trail (dashed & dimmer for past attempt replays)
+        // Motion trails: faint swirling wisps in STORM, stronger trails on FLYING_IN / REJECTED_OUT
         if (sq.trail.length > 1) {
           ctx.save();
-          if (isDimmedReplay) ctx.setLineDash([3, 4]);
+          if (isDimmedReplay && sq.state !== 'STORM') ctx.setLineDash([3, 4]);
           ctx.beginPath();
           for (let i = 0; i < sq.trail.length; i++) {
             const pt = sq.trail[i];
@@ -1125,8 +1280,13 @@
             else ctx.lineTo(pt.x, pt.y);
           }
           ctx.strokeStyle = sq.color;
-          ctx.globalAlpha = isDimmedReplay ? 0.22 : 0.4;
-          ctx.lineWidth = 1.4;
+          if (sq.state === 'STORM') {
+            ctx.globalAlpha = isAmbient ? 0.07 : (isDimmedReplay ? 0.14 : 0.16);
+            ctx.lineWidth = 1;
+          } else {
+            ctx.globalAlpha = isDimmedReplay ? 0.26 : 0.45;
+            ctx.lineWidth = 1.4;
+          }
           ctx.stroke();
           ctx.restore();
         }
@@ -1158,28 +1318,29 @@
 
         ctx.strokeStyle = isHovered ? '#ffffff' : sq.color;
         ctx.lineWidth = isHovered ? 2 : 1.3;
-        ctx.fillStyle = sq.isClaimed ? sq.color : 'rgba(136, 146, 176, 0.18)';
+        ctx.fillStyle = sq.isClaimed ? sq.color : 'rgba(71, 85, 105, 0.15)';
 
-        // Dimmer opacity for past failed attempts so live events stand out immediately
-        if (isDimmedReplay && !isHovered) {
-          ctx.globalAlpha = (sq.state === 'FLYING_IN' || sq.state === 'REJECTED_OUT') ? 0.46 : 0.28;
+        if (isAmbient && !isHovered) {
+          ctx.globalAlpha = 0.22;
+        } else if (isDimmedReplay && !isHovered) {
+          ctx.globalAlpha = (sq.state === 'FLYING_IN' || sq.state === 'REJECTED_OUT') ? 0.54 : 0.34;
         } else {
           ctx.globalAlpha = sq.isClaimed ? 0.88 : 0.42;
         }
 
         ctx.fillRect(-s / 2, -s / 2, s, s);
-        ctx.globalAlpha = isDimmedReplay && !isHovered ? 0.52 : 1.0;
+        ctx.globalAlpha = isAmbient && !isHovered ? 0.32 : (isDimmedReplay && !isHovered ? 0.58 : 1.0);
         ctx.strokeRect(-s / 2, -s / 2, s, s);
         ctx.restore();
 
-        // Floating Date/Time Stamp directly on flying past failed attempts
+        // Floating timestamp & IP on lunging past failed attempts
         if (isDimmedReplay && (sq.state === 'FLYING_IN' || sq.state === 'REJECTED_OUT') && sq.replayStamp) {
           ctx.save();
           ctx.font = '500 9.5px "JetBrains Mono", monospace';
           ctx.textAlign = 'center';
-          ctx.fillStyle = 'rgba(215, 110, 125, 0.62)';
+          ctx.fillStyle = 'rgba(215, 110, 125, 0.72)';
           ctx.fillText(sq.replayStamp, sq.x, sq.y - sq.size - 7);
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.34)';
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.42)';
           ctx.fillText(sq.ip, sq.x, sq.y + sq.size + 12);
           ctx.restore();
         }
@@ -1208,6 +1369,7 @@
       ctx.fillRect(0, 0, W, H);
 
       updatePhysics();
+      drawVortexBackdrop();
       drawHomeBase();
       drawSquares();
 
