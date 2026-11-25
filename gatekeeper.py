@@ -1,4 +1,5 @@
 from flask import Flask, request, render_template, redirect, url_for, make_response, jsonify
+import argparse
 import json
 import os
 import logging
@@ -43,8 +44,10 @@ app.secret_key = 'weqr1234'
 USER_PASSWORD = "weqr1234"
 ADMIN_PASSWORD = "dws13125851313241086670"
 DATA_FILE = 'data/access_log.json'
+DATA_RETENTION_DAYS = 4
 MAX_EVENTS = 120
 MAX_FAILED_HISTORY = 250
+TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
 TRUSTED_IPS = [
     "127.0.0.1",
@@ -53,6 +56,7 @@ TRUSTED_IPS = [
 ]
 
 FAILED_EVENT_TYPES = {"REJECT", "LOGIN_FAIL", "VERIFY_FAIL", "ADMIN_BAN"}
+
 
 # --- HELPER FUNCTIONS FOR SERVER PINGING ---
 def is_server_online(target):
@@ -82,6 +86,7 @@ def is_server_online(target):
     except Exception:
         return False
 
+
 # --- HELPER FUNCTIONS FOR GEOLOCATION ---
 def get_ip_location(ip, data=None):
     if ip.startswith(('192.168.', '10.', '127.', '172.')):
@@ -104,6 +109,7 @@ def get_ip_location(ip, data=None):
         pass
     return "Unknown Location"
 
+
 def get_gps_address(lat, lon):
     try:
         headers = {'User-Agent': 'DWSGatekeeperAuth/1.0'}
@@ -122,8 +128,10 @@ def get_gps_address(lat, lon):
         logging.error(f"[Gatekeeper] Reverse Geocode error: {e}")
         return f"GPS: {lat[:7]}, {lon[:7]}"
 
-# --- DATABASE MANAGEMENT (CRASH-PROOF) ---
+
+# --- DATABASE MANAGEMENT & 4-DAY RETENTION ---
 os.makedirs('data', exist_ok=True)
+
 
 def default_db_structure():
     return {
@@ -139,9 +147,24 @@ def default_db_structure():
         "last_event_id": 0
     }
 
+
+def parse_timestamp(ts_str):
+    if not ts_str or not isinstance(ts_str, str):
+        return None
+    try:
+        return datetime.strptime(ts_str, TIME_FMT)
+    except ValueError:
+        return None
+
+
+def is_within_retention(ts_str, cutoff):
+    dt = parse_timestamp(ts_str)
+    return dt is not None and dt >= cutoff
+
+
 def record_event(data, event_type, ip, route, status_code, detail="", location=None, user_agent=None, origin=None, session_id=None):
     """Appends a real network/auth event to the live queue and archives failed attempts for replay."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now().strftime(TIME_FMT)
     if not user_agent:
         user_agent = request.headers.get('User-Agent', 'Unknown Browser')
     short_ua = user_agent[:48] + "..." if len(user_agent) > 48 else user_agent
@@ -181,27 +204,39 @@ def record_event(data, event_type, ip, route, status_code, detail="", location=N
     if len(events) > MAX_EVENTS:
         data['events'] = events[-MAX_EVENTS:]
 
-    # Permanently archive failed attempts so /watch can cycle past attempts with timestamps
+    # Archive failed attempts (automatically pruned after DATA_RETENTION_DAYS)
     if event_type in FAILED_EVENT_TYPES:
         failed_hist = data.setdefault('failed_history', [])
         failed_hist.append(event_obj)
         if len(failed_hist) > MAX_FAILED_HISTORY:
             data['failed_history'] = failed_hist[-MAX_FAILED_HISTORY:]
 
+
 def backfill_failed_history(data):
-    """Ensures any legacy attempts or banned IPs in access_log.json are seeded into failed_history."""
+    """Seeds recent failed attempts (within retention window) into failed_history if missing."""
+    cutoff = datetime.now() - timedelta(days=DATA_RETENTION_DAYS)
     failed_hist = data.setdefault('failed_history', [])
+    existing_sigs = {
+        (item.get('id', 0), item.get('ip'), item.get('time'), item.get('route'))
+        for item in failed_hist
+    }
     existing_ips = {item.get('ip') for item in failed_hist}
+    changed = False
 
-    # Backfill from events if needed
+    # Backfill recent failures from events
     for ev in data.get('events', []):
-        if ev.get('type') in FAILED_EVENT_TYPES and ev not in failed_hist:
-            failed_hist.append(ev)
-            existing_ips.add(ev.get('ip'))
+        if ev.get('type') in FAILED_EVENT_TYPES and is_within_retention(ev.get('time'), cutoff):
+            sig = (ev.get('id', 0), ev.get('ip'), ev.get('time'), ev.get('route'))
+            if sig not in existing_sigs:
+                failed_hist.append(ev)
+                existing_sigs.add(sig)
+                existing_ips.add(ev.get('ip'))
+                changed = True
 
-    # Backfill from current/legacy attempts table
+    # Backfill recent attempts
     for ip, info in data.get('attempts', {}).items():
-        if ip not in existing_ips:
+        ts = info.get('time')
+        if ip not in existing_ips and is_within_retention(ts, cutoff):
             failed_hist.append({
                 "id": 0,
                 "type": "REJECT",
@@ -213,13 +248,15 @@ def backfill_failed_history(data):
                 "device_info": "Recorded in access_log.json",
                 "origin": "",
                 "session_id": "",
-                "time": info.get('time', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                "time": ts
             })
             existing_ips.add(ip)
+            changed = True
 
-    # Backfill from banned_ips table
+    # Backfill only recently banned IPs (older bans stay active in banned_ips without cluttering the storm)
     for ip, info in data.get('banned_ips', {}).items():
-        if ip not in existing_ips:
+        ts = info.get('time')
+        if ip not in existing_ips and is_within_retention(ts, cutoff):
             failed_hist.append({
                 "id": 0,
                 "type": "ADMIN_BAN",
@@ -231,39 +268,55 @@ def backfill_failed_history(data):
                 "device_info": "Banned in access_log.json",
                 "origin": "",
                 "session_id": "",
-                "time": info.get('time', datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                "time": ts
             })
             existing_ips.add(ip)
+            changed = True
 
     if len(failed_hist) > MAX_FAILED_HISTORY:
         data['failed_history'] = failed_hist[-MAX_FAILED_HISTORY:]
+        changed = True
 
-def cleanup_old_attempts(data):
+    return changed
+
+
+def prune_old_data(data):
+    """
+    Prunes expired short-lived states (attempts, pending_logins) and all telemetry/history
+    older than DATA_RETENTION_DAYS. Preserves active_sessions, allowed_ips, and banned_ips.
+    Returns (data, stats_dict) where stats_dict['changed'] indicates if anything was modified.
+    """
     now = datetime.now()
-    expired_ips = []
+    cutoff = now - timedelta(days=DATA_RETENTION_DAYS)
+    stats = {
+        "changed": False,
+        "attempts": 0,
+        "pending_logins": 0,
+        "events": 0,
+        "failed_history": 0,
+        "known_ips": 0,
+        "geo_cache": 0
+    }
 
+    # 1. Expire short-lived attempt counters (> 5 minutes)
     for ip, info in list(data.get('attempts', {}).items()):
-        try:
-            last_attempt = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
-            if now - last_attempt > timedelta(minutes=5):
-                expired_ips.append(ip)
-        except (ValueError, KeyError, TypeError):
-            expired_ips.append(ip)
+        last_attempt = parse_timestamp(info.get('time') if isinstance(info, dict) else None)
+        if not last_attempt or (now - last_attempt > timedelta(minutes=5)):
+            data['attempts'].pop(ip, None)
+            stats['attempts'] += 1
+            stats['changed'] = True
 
-    for ip in expired_ips:
-        data['attempts'].pop(ip, None)
-
+    # 2. Expire timed-out lock screen waits (> 75 seconds)
     expired_pending = []
     for ip, info in list(data.get('pending_logins', {}).items()):
-        try:
-            wait_start = datetime.strptime(info['time'], "%Y-%m-%d %H:%M:%S")
-            if now - wait_start > timedelta(seconds=75):
-                expired_pending.append((ip, info))
-        except (ValueError, KeyError, TypeError):
-            expired_pending.append((ip, {}))
+        wait_start = parse_timestamp(info.get('time') if isinstance(info, dict) else None)
+        if not wait_start or (now - wait_start > timedelta(seconds=75)):
+            expired_pending.append((ip, info if isinstance(info, dict) else {}))
 
     for ip, info in expired_pending:
         data['pending_logins'].pop(ip, None)
+        stats['pending_logins'] += 1
+        stats['changed'] = True
         record_event(
             data,
             event_type="LOCK_ABANDON",
@@ -275,33 +328,91 @@ def cleanup_old_attempts(data):
             user_agent=info.get('device_info')
         )
 
-    return data
+    # 3. Prune live events older than DATA_RETENTION_DAYS
+    orig_events = data.get('events', [])
+    fresh_events = [ev for ev in orig_events if isinstance(ev, dict) and is_within_retention(ev.get('time'), cutoff)]
+    if len(fresh_events) > MAX_EVENTS:
+        fresh_events = fresh_events[-MAX_EVENTS:]
+    if len(fresh_events) != len(orig_events):
+        stats['events'] = len(orig_events) - len(fresh_events)
+        data['events'] = fresh_events
+        stats['changed'] = True
 
-def load_data():
+    # 4. Prune failed_history older than DATA_RETENTION_DAYS
+    orig_failed = data.get('failed_history', [])
+    fresh_failed = [ev for ev in orig_failed if isinstance(ev, dict) and is_within_retention(ev.get('time'), cutoff)]
+    if len(fresh_failed) > MAX_FAILED_HISTORY:
+        fresh_failed = fresh_failed[-MAX_FAILED_HISTORY:]
+    if len(fresh_failed) != len(orig_failed):
+        stats['failed_history'] = len(orig_failed) - len(fresh_failed)
+        data['failed_history'] = fresh_failed
+        stats['changed'] = True
+
+    # 5. Prune known_ips older than DATA_RETENTION_DAYS (keep currently active/whitelisted/pending IPs)
+    protected_ips = set(data.get('allowed_ips', {}).keys()) | set(data.get('pending_logins', {}).keys())
+    for sess in data.get('active_sessions', {}).values():
+        if isinstance(sess, dict) and sess.get('ip'):
+            protected_ips.add(sess['ip'])
+
+    for ip, info in list(data.get('known_ips', {}).items()):
+        if ip in protected_ips:
+            continue
+        last_seen = info.get('last_seen') if isinstance(info, dict) else None
+        if not is_within_retention(last_seen, cutoff):
+            data['known_ips'].pop(ip, None)
+            stats['known_ips'] += 1
+            stats['changed'] = True
+
+    # 6. Sweep orphaned geo_cache entries for IPs no longer referenced anywhere in the file
+    referenced_ips = (
+        protected_ips
+        | set(data.get('known_ips', {}).keys())
+        | set(data.get('banned_ips', {}).keys())
+        | set(data.get('attempts', {}).keys())
+        | {ev.get('ip') for ev in data.get('events', []) if ev.get('ip')}
+        | {ev.get('ip') for ev in data.get('failed_history', []) if ev.get('ip')}
+    )
+    for ip in list(data.get('geo_cache', {}).keys()):
+        if ip not in referenced_ips:
+            data['geo_cache'].pop(ip, None)
+            stats['geo_cache'] += 1
+            stats['changed'] = True
+
+    return data, stats
+
+
+def load_data(return_stats=False):
     defaults = default_db_structure()
 
     if not os.path.exists(DATA_FILE):
-        return defaults
+        return (defaults, {"changed": False}) if return_stats else defaults
 
     try:
         with open(DATA_FILE, 'r') as f:
             data = json.load(f)
     except Exception as e:
         logging.warning(f"[Gatekeeper] Database corrupted or empty ({e}). Rebuilding clean state...")
-        return defaults
+        return (defaults, {"changed": True}) if return_stats else defaults
 
     if not isinstance(data, dict):
-        return defaults
+        return (defaults, {"changed": True}) if return_stats else defaults
 
+    schema_changed = False
     for key, default_val in defaults.items():
         if key not in data or not isinstance(data[key], type(default_val)):
             data[key] = default_val
+            schema_changed = True
 
-    backfill_failed_history(data)
-    return cleanup_old_attempts(data)
+    backfilled = backfill_failed_history(data)
+    data, stats = prune_old_data(data)
+    if schema_changed or backfilled:
+        stats['changed'] = True
+
+    return (data, stats) if return_stats else data
+
 
 def save_data(data):
-    data = cleanup_old_attempts(data)
+    data, _ = prune_old_data(data)
     temp_file = f"{DATA_FILE}.{uuid.uuid4().hex}.tmp"
     try:
         with open(temp_file, 'w') as f:
@@ -312,24 +423,44 @@ def save_data(data):
         if os.path.exists(temp_file):
             os.remove(temp_file)
 
+
+def prune_database_file():
+    """Immediately loads, prunes >4-day-old records from data/access_log.json, and saves atomically."""
+    if not os.path.exists(DATA_FILE):
+        logging.info(f"[Gatekeeper] No existing {DATA_FILE} to prune; starting clean.")
+        return
+    data, stats = load_data(return_stats=True)
+    if stats.get('changed'):
+        save_data(data)
+        logging.info(
+            f"[Gatekeeper] Pruned {DATA_FILE} ({DATA_RETENTION_DAYS}d retention): "
+            f"-{stats.get('events', 0)} events, "
+            f"-{stats.get('failed_history', 0)} failed_history, "
+            f"-{stats.get('known_ips', 0)} known_ips, "
+            f"-{stats.get('geo_cache', 0)} geo_cache, "
+            f"-{stats.get('attempts', 0)} attempts."
+        )
+    else:
+        logging.info(f"[Gatekeeper] {DATA_FILE} is already clean within the {DATA_RETENTION_DAYS}-day retention window.")
+
+
 def get_client_ip():
     forwarded_ip = request.headers.get('X-Original-Remote-Addr')
     if not forwarded_ip:
         forwarded_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     return (forwarded_ip or "127.0.0.1").split(',')[0].strip()
 
+
 def should_emit_pass_event(data, ip, cooldown_sec=4):
     now = datetime.now()
     for ev in reversed(data.get('events', [])):
         if ev.get('ip') == ip and ev.get('type') in ('AUTH_OK', 'VERIFY_OK'):
-            try:
-                ev_time = datetime.strptime(ev['time'], "%Y-%m-%d %H:%M:%S")
-                if (now - ev_time).total_seconds() < cooldown_sec:
-                    return False
-            except Exception:
-                pass
+            ev_time = parse_timestamp(ev.get('time'))
+            if ev_time and (now - ev_time).total_seconds() < cooldown_sec:
+                return False
             break
     return True
+
 
 # --- ROUTES ---
 
@@ -337,11 +468,13 @@ def should_emit_pass_event(data, ip, cooldown_sec=4):
 def index():
     return redirect(url_for('login'))
 
+
 @app.route('/watch')
 @app.route('/homebase')
 def watch_homebase():
     """Zero-options real-time HomeBase visualizer."""
     return render_template('watch.html')
+
 
 @app.route('/api/offlinestatus', methods=['GET', 'OPTIONS'])
 def api_offline_status():
@@ -386,6 +519,7 @@ def api_offline_status():
 
     return response
 
+
 @app.route('/api/telemetry', methods=['GET', 'OPTIONS'])
 def api_telemetry():
     """Real-time data feed for the /watch visualizer."""
@@ -399,13 +533,15 @@ def api_telemetry():
         return response
 
     since_id = request.args.get('since', default=0, type=int)
-    data = load_data()
-    save_data(data)
+    data, stats = load_data(return_stats=True)
+    if stats.get('changed'):
+        save_data(data)
 
     new_events = [ev for ev in data.get('events', []) if ev.get('id', 0) > since_id]
 
     payload = {
-        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "server_time": datetime.now().strftime(TIME_FMT),
+        "retention_days": DATA_RETENTION_DAYS,
         "last_event_id": data.get('last_event_id', 0),
         "active_sessions": data.get('active_sessions', {}),
         "allowed_ips": data.get('allowed_ips', {}),
@@ -422,6 +558,7 @@ def api_telemetry():
         response.headers.add("Access-Control-Allow-Origin", origin)
         response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
+
 
 @app.route('/api/login_leave', methods=['POST'])
 def api_login_leave():
@@ -441,6 +578,7 @@ def api_login_leave():
         )
         save_data(data)
     return jsonify({"status": "ok"})
+
 
 @app.route('/auth')
 def auth():
@@ -481,7 +619,7 @@ def auth():
     session_id = request.cookies.get('dws_auth')
     if ip in data['allowed_ips'] or (session_id and session_id in data['active_sessions']):
         if session_id and session_id in data['active_sessions']:
-            data['active_sessions'][session_id]['last_seen'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data['active_sessions'][session_id]['last_seen'] = datetime.now().strftime(TIME_FMT)
             data['active_sessions'][session_id]['last_uri'] = target_url
         if should_emit_pass_event(data, ip, cooldown_sec=4):
             record_event(
@@ -499,13 +637,13 @@ def auth():
     loc_str = "📍 " + get_ip_location(ip, data)
     if ip not in data['attempts']:
         data['attempts'][ip] = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": datetime.now().strftime(TIME_FMT),
             "count": 1,
             "location": loc_str
         }
     else:
         data['attempts'][ip]['count'] += 1
-        data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data['attempts'][ip]['time'] = datetime.now().strftime(TIME_FMT)
 
     record_event(
         data,
@@ -518,6 +656,7 @@ def auth():
     )
     save_data(data)
     return "Unauthorized", 401
+
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -544,7 +683,7 @@ def login():
 
             data['active_sessions'][new_session_id] = {
                 "ip": ip,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time": datetime.now().strftime(TIME_FMT),
                 "location": location_str,
                 "device_info": short_ua
             }
@@ -573,10 +712,10 @@ def login():
         else:
             loc_str = "📍 " + get_ip_location(ip, data)
             if ip not in data['attempts']:
-                data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc_str}
+                data['attempts'][ip] = {"time": datetime.now().strftime(TIME_FMT), "count": 1, "location": loc_str}
             else:
                 data['attempts'][ip]['count'] += 1
-                data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                data['attempts'][ip]['time'] = datetime.now().strftime(TIME_FMT)
 
             data['pending_logins'].pop(ip, None)
             record_event(
@@ -596,7 +735,7 @@ def login():
         loc_str = "📍 " + get_ip_location(ip, data)
         data['pending_logins'][ip] = {
             "ip": ip,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": datetime.now().strftime(TIME_FMT),
             "location": loc_str,
             "device_info": short_ua,
             "redirect_url": redirect_url
@@ -621,6 +760,7 @@ def login():
 
     return resp
 
+
 def check_token(token):
     print(f"[Gatekeeper] 3. Checking token string: {token}", flush=True)
 
@@ -628,10 +768,8 @@ def check_token(token):
         print("[Gatekeeper] -> Result: FAILED. No token was provided by the browser.", flush=True)
         return False
 
-    log_path = os.path.join("data", "access_log.json")
-
     try:
-        with open(log_path, "r") as file:
+        with open(DATA_FILE, "r") as file:
             log_data = json.load(file)
 
         active_sessions = log_data.get("active_sessions", {})
@@ -645,15 +783,16 @@ def check_token(token):
             print("[Gatekeeper] -> Result: FAILED. Token not found in active_sessions dictionary.", flush=True)
 
     except FileNotFoundError:
-        print(f"[Gatekeeper] -> Error: Could not find {log_path}", flush=True)
+        print(f"[Gatekeeper] -> Error: Could not find {DATA_FILE}", flush=True)
     except json.JSONDecodeError:
-        print(f"[Gatekeeper] -> Error: {log_path} contains invalid JSON", flush=True)
+        print(f"[Gatekeeper] -> Error: {DATA_FILE} contains invalid JSON", flush=True)
 
     return False
 
+
 @app.route('/api/verify', methods=['POST', 'OPTIONS'])
 def verify_access():
-    print(f"\n[Gatekeeper] 1. --- New Authorization Request ---", flush=True)
+    print("\n[Gatekeeper] 1. --- New Authorization Request ---", flush=True)
 
     origin = request.headers.get('Origin')
 
@@ -677,7 +816,7 @@ def verify_access():
     if is_valid:
         print("[Gatekeeper] 4. Access GRANTED.", flush=True)
         if session_token in data.get('active_sessions', {}):
-            data['active_sessions'][session_token]['last_seen'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data['active_sessions'][session_token]['last_seen'] = datetime.now().strftime(TIME_FMT)
         record_event(
             data,
             event_type="VERIFY_OK",
@@ -728,6 +867,7 @@ def verify_access():
 
     return response
 
+
 # --- API AUTHENTICATION ROUTES ---
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
@@ -761,7 +901,7 @@ def api_login():
 
         data['active_sessions'][new_session_id] = {
             "ip": ip,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": datetime.now().strftime(TIME_FMT),
             "location": location_str,
             "device_info": user_agent[:40] + "..." if len(user_agent) > 40 else user_agent
         }
@@ -795,10 +935,10 @@ def api_login():
     else:
         loc_str = "📍 " + get_ip_location(ip, data)
         if ip not in data['attempts']:
-            data['attempts'][ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "count": 1, "location": loc_str}
+            data['attempts'][ip] = {"time": datetime.now().strftime(TIME_FMT), "count": 1, "location": loc_str}
         else:
             data['attempts'][ip]['count'] += 1
-            data['attempts'][ip]['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            data['attempts'][ip]['time'] = datetime.now().strftime(TIME_FMT)
 
         data['pending_logins'].pop(ip, None)
         record_event(
@@ -823,6 +963,7 @@ def api_login():
         response.headers.add("Access-Control-Allow-Credentials", "true")
 
     return response
+
 
 @app.route('/api/status', methods=['GET', 'OPTIONS'])
 def api_status():
@@ -874,6 +1015,7 @@ def api_status():
 
     return response
 
+
 @app.route('/api/logout', methods=['POST', 'OPTIONS'])
 def api_logout():
     origin = request.headers.get('Origin')
@@ -915,6 +1057,7 @@ def api_logout():
 
     return response
 
+
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
     if request.method == 'POST':
@@ -927,6 +1070,7 @@ def admin():
         return render_template('login.html', is_admin=True)
 
     return render_template('admin.html', data=load_data())
+
 
 @app.route('/api/action', methods=['POST'])
 def admin_action():
@@ -955,7 +1099,7 @@ def admin_action():
         logging.info(f"[Gatekeeper] Revoked Active Session: {session_id}")
 
     elif action == 'allow':
-        data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        data['allowed_ips'][target_ip] = {"name": name, "time": datetime.now().strftime(TIME_FMT)}
         data['attempts'].pop(target_ip, None)
         data['pending_logins'].pop(target_ip, None)
         record_event(
@@ -980,7 +1124,7 @@ def admin_action():
             )
 
     elif action == 'ban':
-        data['banned_ips'][target_ip] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        data['banned_ips'][target_ip] = {"time": datetime.now().strftime(TIME_FMT)}
         data['allowed_ips'].pop(target_ip, None)
         data['attempts'].pop(target_ip, None)
         data['pending_logins'].pop(target_ip, None)
@@ -996,6 +1140,17 @@ def admin_action():
     save_data(data)
     return jsonify({"status": "success"})
 
+
 if __name__ == '__main__':
-    logging.info("[Gatekeeper] Gatekeeper Auth Module is ONLINE and listening on port 5050.")
+    parser = argparse.ArgumentParser(description="DWS Gatekeeper Auth Server")
+    parser.add_argument('--prune', action='store_true', help="Prune records older than retention window and exit")
+    args = parser.parse_args()
+
+    # Clean up any records older than DATA_RETENTION_DAYS immediately on launch
+    prune_database_file()
+
+    if args.prune:
+        sys.exit(0)
+
+    logging.info(f"[Gatekeeper] Gatekeeper Auth Module is ONLINE on port 5050 ({DATA_RETENTION_DAYS}d log retention).")
     app.run(host='0.0.0.0', port=5050)
